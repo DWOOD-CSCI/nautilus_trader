@@ -459,6 +459,23 @@ mod tests {
     }
 
     #[test]
+    fn test_client_creation_live() {
+        let config = StreamConfig::new(
+            OANDAEnvironment::Live,
+            "test-api-key",
+            "test-account",
+            vec!["EUR_USD".into()],
+        );
+
+        let client = OANDAStreamClient::new(config);
+        assert_eq!(client.state(), StreamState::Disconnected);
+        
+        // Verify it's configured for live environment
+        let url = client.config.streaming_url();
+        assert!(url.contains("stream-fxtrade.oanda.com"));
+    }
+
+    #[test]
     fn test_client_stats() {
         let config = StreamConfig::default();
         let client = OANDAStreamClient::new(config);
@@ -466,5 +483,88 @@ mod tests {
         let stats = client.stats();
         assert_eq!(stats.messages_received, 0);
         assert_eq!(stats.reconnections, 0);
+        assert_eq!(stats.prices_received, 0);
+        assert_eq!(stats.heartbeats_received, 0);
+    }
+
+    #[test]
+    fn test_client_multiple_instruments() {
+        let config = StreamConfig::new(
+            OANDAEnvironment::Practice,
+            "test-api-key",
+            "test-account",
+            vec!["EUR_USD".into(), "GBP_USD".into(), "USD_JPY".into()],
+        );
+
+        let client = OANDAStreamClient::new(config);
+        let url = client.config.streaming_url();
+        
+        // All instruments should be in the URL
+        assert!(url.contains("EUR_USD"));
+        assert!(url.contains("GBP_USD"));
+        assert!(url.contains("USD_JPY"));
+    }
+
+    #[test]
+    fn test_stream_state_debug() {
+        // StreamState should have Debug trait
+        assert_eq!(format!("{:?}", StreamState::Disconnected), "Disconnected");
+        assert_eq!(format!("{:?}", StreamState::Connecting), "Connecting");
+        assert_eq!(format!("{:?}", StreamState::Connected), "Connected");
+        assert_eq!(format!("{:?}", StreamState::Reconnecting), "Reconnecting");
+    }
+
+    #[test]
+    fn test_stream_error_display() {
+        let config_err = StreamError::Configuration("missing api key".into());
+        assert!(config_err.to_string().contains("missing api key"));
+
+        let conn_err = StreamError::Connection("network failure".into());
+        assert!(conn_err.to_string().contains("network failure"));
+
+        let timeout_err = StreamError::Timeout(30);
+        assert!(timeout_err.to_string().contains("30"));
+
+        let parse_err = StreamError::Parse("invalid json".into());
+        assert!(parse_err.to_string().contains("invalid json"));
+
+        let disc_err = StreamError::Disconnected("server closed".into());
+        assert!(disc_err.to_string().contains("server closed"));
+
+        let auth_err = StreamError::Authentication("invalid token".into());
+        assert!(auth_err.to_string().contains("invalid token"));
+
+        let http_err = StreamError::Http { status: 401, message: "Unauthorized".into() };
+        assert!(http_err.to_string().contains("401"));
+
+        let closed_err = StreamError::Closed;
+        assert!(closed_err.to_string().contains("closed"));
+
+        let max_err = StreamError::MaxReconnects(5);
+        assert!(max_err.to_string().contains("5"));
+    }
+
+    #[test]
+    fn test_client_config_access() {
+        let config = StreamConfig::new(
+            OANDAEnvironment::Practice,
+            "my-api-key",
+            "my-account",
+            vec!["EUR_USD".into()],
+        );
+
+        let client = OANDAStreamClient::new(config);
+        
+        // Config should be accessible
+        assert_eq!(client.config.account_id, "my-account");
+        assert_eq!(client.config.instruments, vec!["EUR_USD"]);
+        assert!(client.config.include_heartbeats);
+    }
+
+    #[test]
+    fn test_client_state_equality() {
+        assert_eq!(StreamState::Disconnected, StreamState::Disconnected);
+        assert_ne!(StreamState::Disconnected, StreamState::Connected);
+        assert_ne!(StreamState::Connecting, StreamState::Reconnecting);
     }
 }

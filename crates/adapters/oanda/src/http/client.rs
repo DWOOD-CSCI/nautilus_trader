@@ -54,11 +54,11 @@ pub struct OANDAHttpClient {
     /// Base URL for API requests.
     base_url: String,
     /// Account ID.
-    account_id: String,
-    /// Request timeout.
-    timeout: Duration,
+    pub account_id: String,
     /// Maximum retry attempts.
     max_retries: u32,
+    /// Initial retry delay in milliseconds.
+    initial_retry_delay_ms: u64,
 }
 
 impl OANDAHttpClient {
@@ -122,8 +122,8 @@ impl OANDAHttpClient {
             client,
             base_url,
             account_id,
-            timeout,
             max_retries: max_retries.unwrap_or(3),
+            initial_retry_delay_ms: 100,
         })
     }
 
@@ -142,13 +142,11 @@ impl OANDAHttpClient {
     // ============================================================================================
 
     /// Sends a GET request to the specified endpoint.
-    
     async fn get<T: DeserializeOwned>(&self, endpoint: &str) -> Result<T, OANDAHttpError> {
         self.request(Method::GET, endpoint, None::<&()>).await
     }
 
     /// Sends a GET request with query parameters.
-    
     async fn get_with_params<T: DeserializeOwned>(
         &self,
         endpoint: &str,
@@ -159,7 +157,6 @@ impl OANDAHttpClient {
     }
 
     /// Sends a POST request with JSON body.
-    
     async fn post<T: DeserializeOwned, B: serde::Serialize + std::fmt::Debug>(
         &self,
         endpoint: &str,
@@ -169,7 +166,6 @@ impl OANDAHttpClient {
     }
 
     /// Sends a PUT request with JSON body.
-    
     async fn put<T: DeserializeOwned, B: serde::Serialize + std::fmt::Debug>(
         &self,
         endpoint: &str,
@@ -221,7 +217,8 @@ impl OANDAHttpClient {
             match self.handle_response(response).await {
                 Ok(result) => return Ok(result),
                 Err(e) if e.is_retryable() && attempts < self.max_retries => {
-                    let delay = Duration::from_millis(100 * 2u64.pow(attempts));
+                    // Exponential backoff: initial_delay * 2^attempts
+                    let delay = Duration::from_millis(self.initial_retry_delay_ms * 2u64.pow(attempts));
                     warn!("Retryable error (attempt {}): {:?}, retrying in {:?}", attempts, e, delay);
                     tokio::time::sleep(delay).await;
                 }
@@ -253,52 +250,42 @@ impl OANDAHttpClient {
         } else {
             let text = response.text().await.unwrap_or_default();
 
-            // Try to parse OANDA error response
-            let error_response: Option<OANDAErrorResponse> = serde_json::from_str(&text).ok();
+            // Try to parse structured OANDA error response
+            if let Ok(error_response) = serde_json::from_str::<OANDAErrorResponse>(&text) {
+                return Err(error_response.into_error());
+            }
 
+            // Handle HTTP status codes when no structured error is available
             match status {
                 StatusCode::UNAUTHORIZED => {
-                    let msg = error_response
-                        .and_then(|e| e.error_message.clone())
-                        .unwrap_or_else(|| "Invalid or expired API token".to_string());
-                    Err(OANDAHttpError::Authentication(msg))
+                    Err(OANDAHttpError::Authentication("Invalid or expired API token".to_string()))
                 }
                 StatusCode::TOO_MANY_REQUESTS => {
                     Err(OANDAHttpError::RateLimited)
                 }
                 StatusCode::BAD_REQUEST => {
-                    let msg = error_response
-                        .and_then(|e| e.error_message.clone())
-                        .unwrap_or_else(|| text.clone());
-                    Err(OANDAHttpError::InvalidParameters(msg))
+                    Err(OANDAHttpError::InvalidParameters(text))
                 }
                 StatusCode::NOT_FOUND => {
-                    let msg = error_response
-                        .and_then(|e| e.error_message.clone())
-                        .unwrap_or_else(|| format!("Resource not found: {}", url));
-                    Err(OANDAHttpError::from_api_response(status.to_string(), msg))
+                    Err(OANDAHttpError::from_api_response(status.to_string(), format!("Resource not found: {}", url)))
                 }
                 _ => {
-                    let msg = error_response
-                        .and_then(|e| e.error_message.clone())
-                        .unwrap_or_else(|| text);
-                    Err(OANDAHttpError::from_api_response(status.to_string(), msg))
+                    Err(OANDAHttpError::from_api_response(status.to_string(), text))
                 }
             }
         }
     }
 
     /// Builds URL with query parameters.
+    ///
+    /// Parameters are URL-encoded to handle special characters safely.
     fn build_url_with_params(&self, endpoint: &str, params: &[(&str, &str)]) -> String {
         let base = format!("{}/{}", self.base_url, endpoint.trim_start_matches('/'));
         if params.is_empty() {
             base
         } else {
-            let query: Vec<String> = params
-                .iter()
-                .map(|(k, v)| format!("{}={}", k, v))
-                .collect();
-            format!("{}?{}", base, query.join("&"))
+            let query = serde_urlencoded::to_string(params).unwrap_or_default();
+            format!("{}?{}", base, query)
         }
     }
 
@@ -307,7 +294,6 @@ impl OANDAHttpClient {
     // ============================================================================================
 
     /// Gets full account details.
-    
     pub async fn get_account(&self) -> Result<AccountDetails, OANDAHttpError> {
         let endpoint = format!("{}/accounts/{}", OANDA_API_VERSION, self.account_id);
         let response: AccountResponse = self.get(&endpoint).await?;
@@ -315,7 +301,6 @@ impl OANDAHttpClient {
     }
 
     /// Gets account summary.
-    
     pub async fn get_account_summary(&self) -> Result<AccountSummary, OANDAHttpError> {
         let endpoint = format!("{}/accounts/{}/summary", OANDA_API_VERSION, self.account_id);
         let response: AccountSummaryResponse = self.get(&endpoint).await?;
@@ -327,7 +312,6 @@ impl OANDAHttpClient {
     // ============================================================================================
 
     /// Gets all tradeable instruments for the account.
-    
     pub async fn get_instruments(&self) -> Result<Vec<InstrumentDetails>, OANDAHttpError> {
         let endpoint = format!("{}/accounts/{}/instruments", OANDA_API_VERSION, self.account_id);
         let response: InstrumentsResponse = self.get(&endpoint).await?;
@@ -335,7 +319,6 @@ impl OANDAHttpClient {
     }
 
     /// Gets specific instruments.
-    
     pub async fn get_instruments_by_name(
         &self,
         instruments: &[&str],
@@ -352,7 +335,6 @@ impl OANDAHttpClient {
     // ============================================================================================
 
     /// Gets current prices for specified instruments.
-    
     pub async fn get_pricing(&self, instruments: &[&str]) -> Result<Vec<Price>, OANDAHttpError> {
         let instruments_str = instruments.join(",");
         let endpoint = format!("{}/accounts/{}/pricing", OANDA_API_VERSION, self.account_id);
@@ -362,7 +344,6 @@ impl OANDAHttpClient {
     }
 
     /// Gets historical candles for an instrument.
-    
     pub async fn get_candles(
         &self,
         instrument: &str,
@@ -408,7 +389,6 @@ impl OANDAHttpClient {
     // ============================================================================================
 
     /// Creates a market order.
-    
     pub async fn create_market_order(
         &self,
         instrument: &str,
@@ -434,7 +414,6 @@ impl OANDAHttpClient {
     }
 
     /// Creates a limit order.
-    
     pub async fn create_limit_order(
         &self,
         instrument: &str,
@@ -470,7 +449,6 @@ impl OANDAHttpClient {
     }
 
     /// Creates a stop order.
-    
     pub async fn create_stop_order(
         &self,
         instrument: &str,
@@ -506,7 +484,6 @@ impl OANDAHttpClient {
     }
 
     /// Cancels a pending order.
-    
     pub async fn cancel_order(&self, order_id: &str) -> Result<OrderResponse, OANDAHttpError> {
         let endpoint = format!(
             "{}/accounts/{}/orders/{}/cancel",
@@ -521,7 +498,6 @@ impl OANDAHttpClient {
     // ============================================================================================
 
     /// Gets all open positions.
-    
     pub async fn get_open_positions(&self) -> Result<Vec<Position>, OANDAHttpError> {
         let endpoint = format!(
             "{}/accounts/{}/openPositions",
@@ -532,7 +508,6 @@ impl OANDAHttpClient {
     }
 
     /// Gets all positions (including closed).
-    
     pub async fn get_positions(&self) -> Result<Vec<Position>, OANDAHttpError> {
         let endpoint = format!(
             "{}/accounts/{}/positions",
@@ -543,7 +518,6 @@ impl OANDAHttpClient {
     }
 
     /// Closes a position for an instrument.
-    
     pub async fn close_position(
         &self,
         instrument: &str,
@@ -571,7 +545,6 @@ impl OANDAHttpClient {
     // ============================================================================================
 
     /// Gets all open trades.
-    
     pub async fn get_open_trades(&self) -> Result<Vec<Trade>, OANDAHttpError> {
         let endpoint = format!(
             "{}/accounts/{}/openTrades",
@@ -582,7 +555,6 @@ impl OANDAHttpClient {
     }
 
     /// Closes a specific trade.
-    
     pub async fn close_trade(
         &self,
         trade_id: &str,
@@ -607,25 +579,128 @@ impl OANDAHttpClient {
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_build_url_with_params() {
+    fn create_test_client() -> OANDAHttpClient {
         let credential = OANDACredential::new("test-token".to_string(), "test-account".to_string());
-        let client = OANDAHttpClient::new(
+        OANDAHttpClient::new(
             credential,
             "test-account".to_string(),
             OANDAEnvironment::Practice,
             None,
             None,
         )
+        .unwrap()
+    }
+
+    #[test]
+    fn test_client_creation() {
+        let client = create_test_client();
+        assert_eq!(client.account_id(), "test-account");
+        assert!(client.base_url().contains("fxpractice.oanda.com"));
+        assert_eq!(client.max_retries, 3);
+        assert_eq!(client.initial_retry_delay_ms, 100);
+    }
+
+    #[test]
+    fn test_client_creation_live() {
+        let credential = OANDACredential::new("test-token".to_string(), "test-account".to_string());
+        let client = OANDAHttpClient::new(
+            credential,
+            "test-account".to_string(),
+            OANDAEnvironment::Live,
+            Some(60),
+            Some(5),
+        )
         .unwrap();
+        assert!(client.base_url().contains("fxtrade.oanda.com"));
+        assert_eq!(client.max_retries, 5);
+    }
+
+    #[test]
+    fn test_build_url_with_params() {
+        let client = create_test_client();
 
         let url = client.build_url_with_params(
             "/v3/accounts/test/pricing",
             &[("instruments", "EUR_USD,GBP_USD")],
         );
-        assert!(url.contains("instruments=EUR_USD,GBP_USD"));
+        // Commas are URL-encoded to %2C by serde_urlencoded
+        assert!(url.contains("instruments=EUR_USD%2CGBP_USD"));
 
         let url_no_params = client.build_url_with_params("/v3/accounts/test", &[]);
         assert!(!url_no_params.contains('?'));
+    }
+
+    #[test]
+    fn test_build_url_with_multiple_params() {
+        let client = create_test_client();
+
+        let url = client.build_url_with_params(
+            "/v3/instruments/EUR_USD/candles",
+            &[("granularity", "M1"), ("count", "100"), ("price", "MBA")],
+        );
+        assert!(url.contains("granularity=M1"));
+        assert!(url.contains("count=100"));
+        assert!(url.contains("price=MBA"));
+        assert!(url.contains("&"));
+    }
+
+    #[test]
+    fn test_build_url_strips_leading_slash() {
+        let client = create_test_client();
+
+        let url1 = client.build_url_with_params("/v3/accounts", &[]);
+        let url2 = client.build_url_with_params("v3/accounts", &[]);
+        
+        // Both should produce valid URLs without double slashes
+        assert!(!url1.contains("//v3"));
+        assert!(!url2.contains("//v3"));
+    }
+
+    #[test]
+    fn test_build_url_with_special_characters() {
+        let client = create_test_client();
+
+        // Test that special characters are properly URL-encoded
+        let url = client.build_url_with_params(
+            "/v3/test",
+            &[("param", "value with spaces"), ("other", "a=b&c=d")],
+        );
+        // Spaces become + or %20, & becomes %26, = becomes %3D
+        assert!(url.contains("value+with+spaces") || url.contains("value%20with%20spaces"));
+        assert!(url.contains("%26") || url.contains("a%3Db"));
+    }
+
+    #[test]
+    fn test_client_accessors() {
+        let client = create_test_client();
+        assert_eq!(client.account_id(), "test-account");
+        assert!(client.base_url().starts_with("https://"));
+        assert!(client.base_url().contains("oanda.com"));
+    }
+
+    #[test]
+    fn test_client_retry_config() {
+        let credential = OANDACredential::new("test-token".to_string(), "test-account".to_string());
+        
+        // Default retries
+        let client1 = OANDAHttpClient::new(
+            credential.clone(),
+            "test-account".to_string(),
+            OANDAEnvironment::Practice,
+            None,
+            None,
+        ).unwrap();
+        assert_eq!(client1.max_retries, 3);
+        assert_eq!(client1.initial_retry_delay_ms, 100);
+
+        // Custom retries
+        let client2 = OANDAHttpClient::new(
+            credential,
+            "test-account".to_string(),
+            OANDAEnvironment::Practice,
+            None,
+            Some(10),
+        ).unwrap();
+        assert_eq!(client2.max_retries, 10);
     }
 }

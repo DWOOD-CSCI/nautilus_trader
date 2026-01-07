@@ -37,8 +37,8 @@ impl OANDAHttpClient {
     /// * `api_key` - OANDA API access token
     /// * `account_id` - OANDA account ID
     /// * `environment` - The OANDA environment (Practice or Live)
-    /// * `timeout_secs` - Optional HTTP request timeout in seconds
-    /// * `rate_limit_per_second` - Optional rate limit for API calls
+    /// * `timeout_secs` - Optional HTTP request timeout in seconds (default: 30)
+    /// * `max_retries` - Optional maximum retry attempts for retryable errors (default: 3)
     ///
     /// # Errors
     ///
@@ -49,14 +49,14 @@ impl OANDAHttpClient {
         account_id,
         environment = OANDAEnvironment::Practice,
         timeout_secs = None,
-        rate_limit_per_second = None
+        max_retries = None
     ))]
     fn py_new(
         api_key: String,
         account_id: String,
         environment: OANDAEnvironment,
         timeout_secs: Option<u64>,
-        rate_limit_per_second: Option<u32>,
+        max_retries: Option<u32>,
     ) -> PyResult<Self> {
         let credential = OANDACredential::new(api_key, account_id.clone());
         Self::new(
@@ -64,7 +64,7 @@ impl OANDAHttpClient {
             account_id,
             environment,
             timeout_secs,
-            rate_limit_per_second,
+            max_retries,
         )
         .map_err(to_pyvalue_err)
     }
@@ -247,6 +247,34 @@ impl OANDAHttpClient {
         })
     }
 
+    /// Submit a stop order.
+    ///
+    /// # Parameters
+    ///
+    /// * `instrument` - Instrument to trade (e.g., "EUR_USD")
+    /// * `units` - Number of units as string (positive for buy, negative for sell)
+    /// * `price` - Stop price as string
+    #[pyo3(name = "create_stop_order")]
+    fn py_create_stop_order<'py>(
+        &self,
+        py: Python<'py>,
+        instrument: String,
+        units: String,
+        price: String,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let client = self.clone();
+        let units_decimal = Decimal::from_str(&units).map_err(to_pyvalue_err)?;
+        let price_decimal = Decimal::from_str(&price).map_err(to_pyvalue_err)?;
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let response = client
+                .create_stop_order(&instrument, units_decimal, price_decimal, None, None, None)
+                .await
+                .map_err(to_pyvalue_err)?;
+            let json_str = serde_json::to_string(&response).map_err(to_pyvalue_err)?;
+            Ok(json_str)
+        })
+    }
+
     /// Cancel an order.
     ///
     /// # Parameters
@@ -261,6 +289,37 @@ impl OANDAHttpClient {
         let client = self.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let response = client.cancel_order(&order_id).await.map_err(to_pyvalue_err)?;
+            let json_str = serde_json::to_string(&response).map_err(to_pyvalue_err)?;
+            Ok(json_str)
+        })
+    }
+
+    /// Close a position for an instrument.
+    ///
+    /// # Parameters
+    ///
+    /// * `instrument` - Instrument name (e.g., "EUR_USD")
+    /// * `long_units` - Optional units to close on long side ("ALL" to close all long units)
+    /// * `short_units` - Optional units to close on short side ("ALL" to close all short units)
+    #[pyo3(name = "close_position")]
+    #[pyo3(signature = (instrument, long_units = None, short_units = None))]
+    fn py_close_position<'py>(
+        &self,
+        py: Python<'py>,
+        instrument: String,
+        long_units: Option<String>,
+        short_units: Option<String>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let client = self.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let response = client
+                .close_position(
+                    &instrument,
+                    long_units.as_deref(),
+                    short_units.as_deref(),
+                )
+                .await
+                .map_err(to_pyvalue_err)?;
             let json_str = serde_json::to_string(&response).map_err(to_pyvalue_err)?;
             Ok(json_str)
         })
