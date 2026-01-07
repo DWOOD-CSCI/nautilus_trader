@@ -5571,6 +5571,47 @@ dependencies = [
 ]
 
 [[package]]
+name = "nautilus-oanda"
+version = "0.53.0"
+dependencies = [
+ "ahash 0.8.12",
+ "anyhow",
+ "arc-swap",
+ "async-stream",
+ "async-trait",
+ "chrono",
+ "dashmap",
+ "derive_builder",
+ "futures-util",
+ "indexmap 2.12.1",
+ "log",
+ "nautilus-common",
+ "nautilus-core",
+ "nautilus-data",
+ "nautilus-execution",
+ "nautilus-live",
+ "nautilus-model",
+ "nautilus-network",
+ "nautilus-testkit",
+ "pyo3",
+ "pyo3-async-runtimes",
+ "reqwest 0.13.1",
+ "rstest",
+ "rust_decimal",
+ "rust_decimal_macros",
+ "serde",
+ "serde_json",
+ "serde_urlencoded",
+ "strum",
+ "thiserror 2.0.17",
+ "tokio",
+ "tokio-tungstenite",
+ "tokio-util",
+ "ustr",
+ "zeroize",
+]
+
+[[package]]
 name = "nautilus-okx"
 version = "0.53.0"
 dependencies = [
