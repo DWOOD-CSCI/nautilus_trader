@@ -23,7 +23,8 @@ use crate::{
     common::enums::OANDAEnvironment,
     websocket::{
         client::OANDAStreamClient,
-        types::{StreamConfig, StreamError, StreamMessage},
+        transaction_client::OANDATransactionStreamClient,
+        types::{StreamConfig, StreamError, StreamMessage, TransactionStreamConfig, TransactionStreamMessage},
     },
 };
 
@@ -251,6 +252,183 @@ impl OANDAStreamClient {
             "OANDAStreamClient(instruments={:?}, connected={})",
             self.instruments(),
             self.is_connected()
+        )
+    }
+}
+
+// ================================================================================================
+// Transaction Stream Client Python Bindings
+// ================================================================================================
+
+#[pymethods]
+impl OANDATransactionStreamClient {
+    /// Create a new OANDA transaction streaming client.
+    ///
+    /// # Parameters
+    ///
+    /// * `api_key` - OANDA API access token
+    /// * `account_id` - OANDA account ID
+    /// * `environment` - The OANDA environment (Practice or Live)
+    /// * `include_heartbeats` - Whether to include heartbeat messages
+    /// * `reconnect_on_error` - Whether to automatically reconnect on errors
+    /// * `max_reconnect_attempts` - Maximum number of reconnection attempts
+    /// * `reconnect_delay_ms` - Delay between reconnection attempts in milliseconds
+    ///
+    /// # Errors
+    ///
+    /// Returns a `PyErr` if the configuration is invalid.
+    #[new]
+    #[pyo3(signature = (
+        api_key,
+        account_id,
+        environment = OANDAEnvironment::Practice,
+        include_heartbeats = false,
+        reconnect_on_error = true,
+        max_reconnect_attempts = 5,
+        reconnect_delay_ms = 1000
+    ))]
+    fn py_new(
+        api_key: String,
+        account_id: String,
+        environment: OANDAEnvironment,
+        include_heartbeats: bool,
+        reconnect_on_error: bool,
+        max_reconnect_attempts: u32,
+        reconnect_delay_ms: u64,
+    ) -> PyResult<Self> {
+        let mut config = TransactionStreamConfig::new(
+            environment,
+            api_key,
+            account_id,
+        );
+        config.include_heartbeats = include_heartbeats;
+        config.reconnect_on_error = reconnect_on_error;
+        config.max_reconnect_attempts = max_reconnect_attempts;
+        config.reconnect_delay_ms = reconnect_delay_ms;
+
+        config.validate().map_err(to_pyvalue_err)?;
+
+        Ok(Self::new(config))
+    }
+
+    /// Check if the stream is currently running.
+    #[pyo3(name = "is_running")]
+    fn py_is_running(&self) -> bool {
+        self.is_running()
+    }
+
+    /// Get streaming statistics.
+    #[pyo3(name = "stats")]
+    fn py_stats(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let stats = self.stats();
+        let dict = pyo3::types::PyDict::new(py);
+        dict.set_item("messages_received", stats.messages_received)?;
+        dict.set_item("prices_received", stats.prices_received)?;
+        dict.set_item("heartbeats_received", stats.heartbeats_received)?;
+        dict.set_item("parse_errors", stats.parse_errors)?;
+        dict.set_item("reconnections", stats.reconnections)?;
+        dict.set_item("last_message_time", stats.last_message_time.clone())?;
+        dict.set_item("connected_at", stats.connected_at.clone())?;
+        Ok(dict.into())
+    }
+
+    /// Connect to the OANDA transaction stream and start receiving messages.
+    ///
+    /// # Parameters
+    ///
+    /// * `callback` - Python callback function to receive transaction updates.
+    ///   The callback receives a dictionary with transaction data or heartbeat.
+    ///
+    /// # Example
+    ///
+    /// ```python
+    /// async def on_transaction(msg):
+    ///     if msg['type'] == 'transaction':
+    ///         print(f"Transaction: {msg['transaction_type']} - {msg['instrument']}")
+    ///     else:
+    ///         print(f"Heartbeat at {msg['time']}")
+    ///
+    /// await client.connect(on_transaction)
+    /// ```
+    #[pyo3(name = "connect")]
+    fn py_connect<'py>(
+        &mut self,
+        py: Python<'py>,
+        callback: Py<PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let mut client = self.clone();
+
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            client.connect().await.map_err(to_pyruntime_err)?;
+
+            // Spawn task to process stream messages
+            let mut stream_client = client.clone();
+            get_runtime().spawn(async move {
+                loop {
+                    match stream_client.next().await {
+                        Some(Ok(msg)) => {
+                            Python::attach(|py| {
+                                let py_obj: Py<PyAny> = match &msg {
+                                    TransactionStreamMessage::Transaction(tx) => {
+                                        let dict = pyo3::types::PyDict::new(py);
+                                        let _ = dict.set_item("type", "transaction");
+                                        let _ = dict.set_item("id", &tx.id);
+                                        let _ = dict.set_item("account_id", &tx.account_id);
+                                        let _ = dict.set_item("time", &tx.time);
+                                        let _ = dict.set_item("transaction_type", format!("{:?}", tx.transaction_type));
+                                        let _ = dict.set_item("order_id", &tx.order_id);
+                                        let _ = dict.set_item("trade_id", &tx.trade_id);
+                                        let _ = dict.set_item("instrument", &tx.instrument);
+                                        let _ = dict.set_item("units", tx.units);
+                                        let _ = dict.set_item("price", tx.price);
+                                        let _ = dict.set_item("pl", tx.pl);
+                                        let _ = dict.set_item("reason", &tx.reason);
+                                        let _ = dict.set_item("account_balance", tx.account_balance);
+                                        dict.into()
+                                    }
+                                    TransactionStreamMessage::Heartbeat(hb) => {
+                                        let dict = pyo3::types::PyDict::new(py);
+                                        let _ = dict.set_item("type", "heartbeat");
+                                        let _ = dict.set_item("time", &hb.time);
+                                        dict.into()
+                                    }
+                                };
+                                call_python(py, &callback, py_obj);
+                            });
+                        }
+                        Some(Err(e)) => {
+                            log::warn!("OANDA transaction stream error: {e:?}");
+                            if matches!(e, StreamError::Disconnected(_)) {
+                                break;
+                            }
+                        }
+                        None => {
+                            log::info!("OANDA transaction stream ended");
+                            break;
+                        }
+                    }
+                }
+            });
+
+            Ok(())
+        })
+    }
+
+    /// Disconnect from the OANDA transaction stream.
+    #[pyo3(name = "disconnect")]
+    fn py_disconnect<'py>(&mut self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let mut client = self.clone();
+
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            client.disconnect().await;
+            Ok(())
+        })
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "OANDATransactionStreamClient(running={})",
+            self.is_running()
         )
     }
 }

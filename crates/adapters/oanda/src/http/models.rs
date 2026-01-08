@@ -603,6 +603,79 @@ pub struct OrderCancelTransaction {
     pub reason: Option<String>,
 }
 
+/// OANDA orders list response.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OrdersResponse {
+    /// List of orders.
+    pub orders: Vec<Order>,
+
+    /// Last transaction ID.
+    #[serde(default, rename = "lastTransactionID")]
+    pub last_transaction_id: Option<String>,
+}
+
+/// OANDA single order response.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SingleOrderResponse {
+    /// The order details.
+    pub order: Order,
+
+    /// Last transaction ID.
+    #[serde(default, rename = "lastTransactionID")]
+    pub last_transaction_id: Option<String>,
+}
+
+/// OANDA single trade response.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SingleTradeResponse {
+    /// The trade details.
+    pub trade: Trade,
+
+    /// Last transaction ID.
+    #[serde(default, rename = "lastTransactionID")]
+    pub last_transaction_id: Option<String>,
+}
+
+/// OANDA trade modification response.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TradeModifyResponse {
+    /// Take profit order that was created.
+    #[serde(default, rename = "takeProfitOrderCreatedTransaction")]
+    pub take_profit_order_created: Option<OrderTransaction>,
+
+    /// Take profit order that was cancelled.
+    #[serde(default, rename = "takeProfitOrderCancelledTransaction")]
+    pub take_profit_order_cancelled: Option<OrderCancelTransaction>,
+
+    /// Stop loss order that was created.
+    #[serde(default, rename = "stopLossOrderCreatedTransaction")]
+    pub stop_loss_order_created: Option<OrderTransaction>,
+
+    /// Stop loss order that was cancelled.
+    #[serde(default, rename = "stopLossOrderCancelledTransaction")]
+    pub stop_loss_order_cancelled: Option<OrderCancelTransaction>,
+
+    /// Trailing stop loss order that was created.
+    #[serde(default, rename = "trailingStopLossOrderCreatedTransaction")]
+    pub trailing_stop_loss_order_created: Option<OrderTransaction>,
+
+    /// Trailing stop loss order that was cancelled.
+    #[serde(default, rename = "trailingStopLossOrderCancelledTransaction")]
+    pub trailing_stop_loss_order_cancelled: Option<OrderCancelTransaction>,
+
+    /// Related transaction IDs.
+    #[serde(default, rename = "relatedTransactionIDs")]
+    pub related_transaction_ids: Vec<String>,
+
+    /// Last transaction ID.
+    #[serde(default, rename = "lastTransactionID")]
+    pub last_transaction_id: Option<String>,
+}
+
 // ================================================================================================
 // Position Models
 // ================================================================================================
@@ -811,12 +884,12 @@ pub struct Trade {
     pub current_units: String,
 
     /// Realized profit/loss on the closed portion.
-    #[serde(rename = "realizedPL")]
-    pub realized_pl: String,
+    #[serde(default, rename = "realizedPL")]
+    pub realized_pl: Option<String>,
 
     /// Unrealized profit/loss on the open portion.
-    #[serde(rename = "unrealizedPL")]
-    pub unrealized_pl: String,
+    #[serde(default, rename = "unrealizedPL")]
+    pub unrealized_pl: Option<String>,
 
     /// Margin currently used by the Trade.
     #[serde(default)]

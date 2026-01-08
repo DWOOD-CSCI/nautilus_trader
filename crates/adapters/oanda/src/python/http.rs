@@ -294,6 +294,222 @@ impl OANDAHttpClient {
         })
     }
 
+    /// Create a take profit order attached to an existing trade.
+    ///
+    /// # Parameters
+    ///
+    /// * `trade_id` - ID of the trade to attach the take profit to
+    /// * `price` - Take profit price as string
+    #[pyo3(name = "create_take_profit_order")]
+    fn py_create_take_profit_order<'py>(
+        &self,
+        py: Python<'py>,
+        trade_id: String,
+        price: String,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let client = self.clone();
+        let price_decimal = Decimal::from_str(&price).map_err(to_pyvalue_err)?;
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let response = client
+                .create_take_profit_order(&trade_id, price_decimal, None, None, None)
+                .await
+                .map_err(to_pyvalue_err)?;
+            let json_str = serde_json::to_string(&response).map_err(to_pyvalue_err)?;
+            Ok(json_str)
+        })
+    }
+
+    /// Create a stop loss order attached to an existing trade.
+    ///
+    /// # Parameters
+    ///
+    /// * `trade_id` - ID of the trade to attach the stop loss to
+    /// * `price` - Optional stop loss price as string
+    /// * `distance` - Optional distance in price units from trade open price
+    #[pyo3(name = "create_stop_loss_order")]
+    #[pyo3(signature = (trade_id, price = None, distance = None))]
+    fn py_create_stop_loss_order<'py>(
+        &self,
+        py: Python<'py>,
+        trade_id: String,
+        price: Option<String>,
+        distance: Option<String>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let client = self.clone();
+        let price_decimal = price
+            .map(|p| Decimal::from_str(&p))
+            .transpose()
+            .map_err(to_pyvalue_err)?;
+        let distance_decimal = distance
+            .map(|d| Decimal::from_str(&d))
+            .transpose()
+            .map_err(to_pyvalue_err)?;
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let response = client
+                .create_stop_loss_order(&trade_id, price_decimal, distance_decimal, None, None, None, None)
+                .await
+                .map_err(to_pyvalue_err)?;
+            let json_str = serde_json::to_string(&response).map_err(to_pyvalue_err)?;
+            Ok(json_str)
+        })
+    }
+
+    /// Create a trailing stop loss order attached to an existing trade.
+    ///
+    /// # Parameters
+    ///
+    /// * `trade_id` - ID of the trade to attach the trailing stop to
+    /// * `distance` - Trailing distance in price units from current price
+    #[pyo3(name = "create_trailing_stop_loss_order")]
+    fn py_create_trailing_stop_loss_order<'py>(
+        &self,
+        py: Python<'py>,
+        trade_id: String,
+        distance: String,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let client = self.clone();
+        let distance_decimal = Decimal::from_str(&distance).map_err(to_pyvalue_err)?;
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let response = client
+                .create_trailing_stop_loss_order(&trade_id, distance_decimal, None, None, None)
+                .await
+                .map_err(to_pyvalue_err)?;
+            let json_str = serde_json::to_string(&response).map_err(to_pyvalue_err)?;
+            Ok(json_str)
+        })
+    }
+
+    /// Create a market-if-touched order.
+    ///
+    /// # Parameters
+    ///
+    /// * `instrument` - Instrument to trade (e.g., "EUR_USD")
+    /// * `units` - Number of units as string (positive for buy, negative for sell)
+    /// * `price` - Trigger price as string
+    #[pyo3(name = "create_market_if_touched_order")]
+    fn py_create_market_if_touched_order<'py>(
+        &self,
+        py: Python<'py>,
+        instrument: String,
+        units: String,
+        price: String,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let client = self.clone();
+        let units_decimal = Decimal::from_str(&units).map_err(to_pyvalue_err)?;
+        let price_decimal = Decimal::from_str(&price).map_err(to_pyvalue_err)?;
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let response = client
+                .create_market_if_touched_order(&instrument, units_decimal, price_decimal, None, None, None, None)
+                .await
+                .map_err(to_pyvalue_err)?;
+            let json_str = serde_json::to_string(&response).map_err(to_pyvalue_err)?;
+            Ok(json_str)
+        })
+    }
+
+    /// Get all pending orders.
+    #[pyo3(name = "get_pending_orders")]
+    fn py_get_pending_orders<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let client = self.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let response = client.get_pending_orders().await.map_err(to_pyvalue_err)?;
+            let json_str = serde_json::to_string(&response).map_err(to_pyvalue_err)?;
+            Ok(json_str)
+        })
+    }
+
+    /// Get a specific order by ID.
+    ///
+    /// # Parameters
+    ///
+    /// * `order_id` - ID of the order to retrieve
+    #[pyo3(name = "get_order")]
+    fn py_get_order<'py>(
+        &self,
+        py: Python<'py>,
+        order_id: String,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let client = self.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let response = client.get_order(&order_id).await.map_err(to_pyvalue_err)?;
+            let json_str = serde_json::to_string(&response).map_err(to_pyvalue_err)?;
+            Ok(json_str)
+        })
+    }
+
+    /// Get a specific trade by ID.
+    ///
+    /// # Parameters
+    ///
+    /// * `trade_id` - ID of the trade to retrieve
+    #[pyo3(name = "get_trade")]
+    fn py_get_trade<'py>(
+        &self,
+        py: Python<'py>,
+        trade_id: String,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let client = self.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let response = client.get_trade(&trade_id).await.map_err(to_pyvalue_err)?;
+            let json_str = serde_json::to_string(&response).map_err(to_pyvalue_err)?;
+            Ok(json_str)
+        })
+    }
+
+    /// Modify dependent orders (TP/SL/TSL) attached to a trade.
+    ///
+    /// # Parameters
+    ///
+    /// * `trade_id` - ID of the trade to modify
+    /// * `take_profit_price` - New take profit price (pass empty string to cancel)
+    /// * `stop_loss_price` - New stop loss price (pass empty string to cancel)
+    /// * `trailing_stop_loss_distance` - New trailing stop distance (pass empty string to cancel)
+    #[pyo3(name = "modify_trade_orders")]
+    #[pyo3(signature = (trade_id, take_profit_price = None, stop_loss_price = None, trailing_stop_loss_distance = None))]
+    fn py_modify_trade_orders<'py>(
+        &self,
+        py: Python<'py>,
+        trade_id: String,
+        take_profit_price: Option<String>,
+        stop_loss_price: Option<String>,
+        trailing_stop_loss_distance: Option<String>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let client = self.clone();
+        
+        // Convert string prices to Option<Option<Decimal>>
+        // None = no change, Some("") = remove, Some(price) = set
+        let tp = take_profit_price.map(|p| {
+            if p.is_empty() {
+                None
+            } else {
+                Some(Decimal::from_str(&p).unwrap())
+            }
+        });
+        let sl = stop_loss_price.map(|p| {
+            if p.is_empty() {
+                None
+            } else {
+                Some(Decimal::from_str(&p).unwrap())
+            }
+        });
+        let tsl = trailing_stop_loss_distance.map(|d| {
+            if d.is_empty() {
+                None
+            } else {
+                Some(Decimal::from_str(&d).unwrap())
+            }
+        });
+        
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let response = client
+                .modify_trade_orders(&trade_id, tp, sl, tsl)
+                .await
+                .map_err(to_pyvalue_err)?;
+            let json_str = serde_json::to_string(&response).map_err(to_pyvalue_err)?;
+            Ok(json_str)
+        })
+    }
+
     /// Close a position for an instrument.
     ///
     /// # Parameters

@@ -5737,6 +5737,7 @@ dependencies = [
  "nautilus-live",
  "nautilus-model",
  "nautilus-network",
+ "nautilus-oanda",
  "nautilus-okx",
  "nautilus-persistence",
  "nautilus-serialization",

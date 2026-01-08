@@ -37,8 +37,9 @@ use crate::http::{
     error::{OANDAErrorResponse, OANDAHttpError},
     models::{
         AccountDetails, AccountResponse, AccountSummary, AccountSummaryResponse, Candle,
-        CandlesResponse, ClientExtensions, InstrumentDetails, InstrumentsResponse, OrderResponse,
-        Position, PositionsResponse, Price, PricingResponse, Trade, TradesResponse,
+        CandlesResponse, ClientExtensions, InstrumentDetails, InstrumentsResponse,
+        OrderResponse, OrdersResponse, Position, PositionsResponse, Price, PricingResponse,
+        SingleOrderResponse, SingleTradeResponse, Trade, TradeModifyResponse, TradesResponse,
     },
 };
 
@@ -493,6 +494,298 @@ impl OANDAHttpClient {
         self.put(&endpoint, &body).await
     }
 
+    /// Creates a take profit order attached to an existing trade.
+    ///
+    /// # Arguments
+    /// * `trade_id` - The ID of the trade to attach the take profit to
+    /// * `price` - The price at which to close the trade for profit
+    /// * `time_in_force` - Time in force for the order (default: GTC)
+    /// * `gtd_time` - Good-til-date time (required if time_in_force is GTD)
+    /// * `client_extensions` - Optional client extensions
+    pub async fn create_take_profit_order(
+        &self,
+        trade_id: &str,
+        price: Decimal,
+        time_in_force: Option<OANDATimeInForce>,
+        gtd_time: Option<&str>,
+        client_extensions: Option<ClientExtensions>,
+    ) -> Result<OrderResponse, OANDAHttpError> {
+        let endpoint = format!("{}/accounts/{}/orders", OANDA_API_VERSION, self.account_id);
+        let tif = time_in_force.unwrap_or(OANDATimeInForce::Gtc);
+
+        let mut order = json!({
+            "type": "TAKE_PROFIT",
+            "tradeID": trade_id,
+            "price": price.to_string(),
+            "timeInForce": tif.as_str(),
+        });
+
+        if matches!(tif, OANDATimeInForce::Gtd) {
+            if let Some(gtd) = gtd_time {
+                order["gtdTime"] = json!(gtd);
+            }
+        }
+
+        if let Some(ext) = client_extensions {
+            order["clientExtensions"] = serde_json::to_value(ext).unwrap();
+        }
+
+        let body = json!({ "order": order });
+        self.post(&endpoint, &body).await
+    }
+
+    /// Creates a stop loss order attached to an existing trade.
+    ///
+    /// # Arguments
+    /// * `trade_id` - The ID of the trade to attach the stop loss to
+    /// * `price` - The price at which to close the trade to limit losses (optional if distance provided)
+    /// * `distance` - Distance in price units from trade open price (optional if price provided)
+    /// * `time_in_force` - Time in force for the order (default: GTC)
+    /// * `gtd_time` - Good-til-date time (required if time_in_force is GTD)
+    /// * `guaranteed` - Whether to request a guaranteed stop loss (additional fee may apply)
+    /// * `client_extensions` - Optional client extensions
+    pub async fn create_stop_loss_order(
+        &self,
+        trade_id: &str,
+        price: Option<Decimal>,
+        distance: Option<Decimal>,
+        time_in_force: Option<OANDATimeInForce>,
+        gtd_time: Option<&str>,
+        guaranteed: Option<bool>,
+        client_extensions: Option<ClientExtensions>,
+    ) -> Result<OrderResponse, OANDAHttpError> {
+        let endpoint = format!("{}/accounts/{}/orders", OANDA_API_VERSION, self.account_id);
+        let tif = time_in_force.unwrap_or(OANDATimeInForce::Gtc);
+
+        let mut order = json!({
+            "type": "STOP_LOSS",
+            "tradeID": trade_id,
+            "timeInForce": tif.as_str(),
+        });
+
+        // Either price or distance is required
+        if let Some(p) = price {
+            order["price"] = json!(p.to_string());
+        }
+        if let Some(d) = distance {
+            order["distance"] = json!(d.to_string());
+        }
+
+        if matches!(tif, OANDATimeInForce::Gtd) {
+            if let Some(gtd) = gtd_time {
+                order["gtdTime"] = json!(gtd);
+            }
+        }
+
+        if let Some(g) = guaranteed {
+            order["guaranteed"] = json!(g);
+        }
+
+        if let Some(ext) = client_extensions {
+            order["clientExtensions"] = serde_json::to_value(ext).unwrap();
+        }
+
+        let body = json!({ "order": order });
+        self.post(&endpoint, &body).await
+    }
+
+    /// Creates a trailing stop loss order attached to an existing trade.
+    ///
+    /// # Arguments
+    /// * `trade_id` - The ID of the trade to attach the trailing stop to
+    /// * `distance` - The trailing distance in price units from the current price
+    /// * `time_in_force` - Time in force for the order (default: GTC)
+    /// * `gtd_time` - Good-til-date time (required if time_in_force is GTD)
+    /// * `client_extensions` - Optional client extensions
+    pub async fn create_trailing_stop_loss_order(
+        &self,
+        trade_id: &str,
+        distance: Decimal,
+        time_in_force: Option<OANDATimeInForce>,
+        gtd_time: Option<&str>,
+        client_extensions: Option<ClientExtensions>,
+    ) -> Result<OrderResponse, OANDAHttpError> {
+        let endpoint = format!("{}/accounts/{}/orders", OANDA_API_VERSION, self.account_id);
+        let tif = time_in_force.unwrap_or(OANDATimeInForce::Gtc);
+
+        let mut order = json!({
+            "type": "TRAILING_STOP_LOSS",
+            "tradeID": trade_id,
+            "distance": distance.to_string(),
+            "timeInForce": tif.as_str(),
+        });
+
+        if matches!(tif, OANDATimeInForce::Gtd) {
+            if let Some(gtd) = gtd_time {
+                order["gtdTime"] = json!(gtd);
+            }
+        }
+
+        if let Some(ext) = client_extensions {
+            order["clientExtensions"] = serde_json::to_value(ext).unwrap();
+        }
+
+        let body = json!({ "order": order });
+        self.post(&endpoint, &body).await
+    }
+
+    /// Creates a market-if-touched order.
+    ///
+    /// A Market-if-Touched Order is an order that executes at market when
+    /// the price touches a specified level.
+    ///
+    /// # Arguments
+    /// * `instrument` - The instrument to trade
+    /// * `units` - The quantity (positive for buy, negative for sell)
+    /// * `price` - The trigger price
+    /// * `time_in_force` - Time in force for the order (default: GTC)
+    /// * `gtd_time` - Good-til-date time (required if time_in_force is GTD)
+    /// * `price_bound` - The worst price the order can be filled at
+    /// * `client_extensions` - Optional client extensions
+    pub async fn create_market_if_touched_order(
+        &self,
+        instrument: &str,
+        units: Decimal,
+        price: Decimal,
+        time_in_force: Option<OANDATimeInForce>,
+        gtd_time: Option<&str>,
+        price_bound: Option<Decimal>,
+        client_extensions: Option<ClientExtensions>,
+    ) -> Result<OrderResponse, OANDAHttpError> {
+        let endpoint = format!("{}/accounts/{}/orders", OANDA_API_VERSION, self.account_id);
+        let tif = time_in_force.unwrap_or(OANDATimeInForce::Gtc);
+
+        let mut order = json!({
+            "type": "MARKET_IF_TOUCHED",
+            "instrument": instrument,
+            "units": units.to_string(),
+            "price": price.to_string(),
+            "timeInForce": tif.as_str(),
+        });
+
+        if matches!(tif, OANDATimeInForce::Gtd) {
+            if let Some(gtd) = gtd_time {
+                order["gtdTime"] = json!(gtd);
+            }
+        }
+
+        if let Some(bound) = price_bound {
+            order["priceBound"] = json!(bound.to_string());
+        }
+
+        if let Some(ext) = client_extensions {
+            order["clientExtensions"] = serde_json::to_value(ext).unwrap();
+        }
+
+        let body = json!({ "order": order });
+        self.post(&endpoint, &body).await
+    }
+
+    /// Gets all pending orders for the account.
+    ///
+    /// # Arguments
+    /// * `instrument` - Optional filter by instrument
+    /// * `ids` - Optional filter by order IDs
+    /// * `state` - Optional filter by state (default returns pending orders)
+    /// * `count` - Maximum number of orders to return
+    /// * `before_id` - Return orders before this ID (for pagination)
+    pub async fn get_orders(
+        &self,
+        instrument: Option<&str>,
+        ids: Option<&[&str]>,
+        state: Option<&str>,
+        count: Option<i32>,
+        before_id: Option<&str>,
+    ) -> Result<OrdersResponse, OANDAHttpError> {
+        let endpoint = format!("{}/accounts/{}/orders", OANDA_API_VERSION, self.account_id);
+
+        let mut params: Vec<(&str, String)> = vec![];
+
+        if let Some(inst) = instrument {
+            params.push(("instrument", inst.to_string()));
+        }
+        if let Some(id_list) = ids {
+            params.push(("ids", id_list.join(",")));
+        }
+        if let Some(s) = state {
+            params.push(("state", s.to_string()));
+        }
+        if let Some(c) = count {
+            params.push(("count", c.to_string()));
+        }
+        if let Some(bid) = before_id {
+            params.push(("beforeID", bid.to_string()));
+        }
+
+        let params_ref: Vec<(&str, &str)> = params.iter().map(|(k, v)| (*k, v.as_str())).collect();
+        self.get_with_params(&endpoint, &params_ref).await
+    }
+
+    /// Gets pending orders for the account.
+    pub async fn get_pending_orders(&self) -> Result<OrdersResponse, OANDAHttpError> {
+        let endpoint = format!(
+            "{}/accounts/{}/pendingOrders",
+            OANDA_API_VERSION, self.account_id
+        );
+        self.get(&endpoint).await
+    }
+
+    /// Gets a specific order by ID.
+    pub async fn get_order(&self, order_id: &str) -> Result<SingleOrderResponse, OANDAHttpError> {
+        let endpoint = format!(
+            "{}/accounts/{}/orders/{}",
+            OANDA_API_VERSION, self.account_id, order_id
+        );
+        self.get(&endpoint).await
+    }
+
+    /// Modifies an existing order.
+    ///
+    /// This replaces the order with a new one. Only certain fields can be changed.
+    ///
+    /// # Arguments
+    /// * `order_id` - The ID of the order to modify
+    /// * `units` - New quantity (for entry orders)
+    /// * `price` - New price
+    /// * `time_in_force` - New time in force
+    /// * `gtd_time` - New GTD time
+    /// * `client_extensions` - New client extensions
+    pub async fn modify_order(
+        &self,
+        order_id: &str,
+        units: Option<Decimal>,
+        price: Option<Decimal>,
+        time_in_force: Option<OANDATimeInForce>,
+        gtd_time: Option<&str>,
+        client_extensions: Option<ClientExtensions>,
+    ) -> Result<OrderResponse, OANDAHttpError> {
+        let endpoint = format!(
+            "{}/accounts/{}/orders/{}",
+            OANDA_API_VERSION, self.account_id, order_id
+        );
+
+        let mut order = json!({});
+
+        if let Some(u) = units {
+            order["units"] = json!(u.to_string());
+        }
+        if let Some(p) = price {
+            order["price"] = json!(p.to_string());
+        }
+        if let Some(tif) = time_in_force {
+            order["timeInForce"] = json!(tif.as_str());
+        }
+        if let Some(gtd) = gtd_time {
+            order["gtdTime"] = json!(gtd);
+        }
+        if let Some(ext) = client_extensions {
+            order["clientExtensions"] = serde_json::to_value(ext).unwrap();
+        }
+
+        let body = json!({ "order": order });
+        self.put(&endpoint, &body).await
+    }
+
     // ============================================================================================
     // Position Endpoints
     // ============================================================================================
@@ -552,6 +845,109 @@ impl OANDAHttpClient {
         );
         let response: TradesResponse = self.get(&endpoint).await?;
         Ok(response.trades)
+    }
+
+    /// Gets all trades with optional filters.
+    ///
+    /// # Arguments
+    /// * `instrument` - Optional filter by instrument
+    /// * `ids` - Optional filter by trade IDs
+    /// * `state` - Optional filter by state (OPEN, CLOSED, CLOSE_WHEN_TRADEABLE, ALL)
+    /// * `count` - Maximum number of trades to return
+    /// * `before_id` - Return trades before this ID (for pagination)
+    pub async fn get_trades(
+        &self,
+        instrument: Option<&str>,
+        ids: Option<&[&str]>,
+        state: Option<&str>,
+        count: Option<i32>,
+        before_id: Option<&str>,
+    ) -> Result<TradesResponse, OANDAHttpError> {
+        let endpoint = format!("{}/accounts/{}/trades", OANDA_API_VERSION, self.account_id);
+
+        let mut params: Vec<(&str, String)> = vec![];
+
+        if let Some(inst) = instrument {
+            params.push(("instrument", inst.to_string()));
+        }
+        if let Some(id_list) = ids {
+            params.push(("ids", id_list.join(",")));
+        }
+        if let Some(s) = state {
+            params.push(("state", s.to_string()));
+        }
+        if let Some(c) = count {
+            params.push(("count", c.to_string()));
+        }
+        if let Some(bid) = before_id {
+            params.push(("beforeID", bid.to_string()));
+        }
+
+        let params_ref: Vec<(&str, &str)> = params.iter().map(|(k, v)| (*k, v.as_str())).collect();
+        self.get_with_params(&endpoint, &params_ref).await
+    }
+
+    /// Gets a specific trade by ID.
+    pub async fn get_trade(&self, trade_id: &str) -> Result<SingleTradeResponse, OANDAHttpError> {
+        let endpoint = format!(
+            "{}/accounts/{}/trades/{}",
+            OANDA_API_VERSION, self.account_id, trade_id
+        );
+        self.get(&endpoint).await
+    }
+
+    /// Modifies dependent orders attached to a trade (TP/SL/TSL).
+    ///
+    /// # Arguments
+    /// * `trade_id` - The ID of the trade to modify
+    /// * `take_profit` - New take profit price (None = no change, Some(None) = remove)
+    /// * `stop_loss` - New stop loss price (None = no change, Some(None) = remove)
+    /// * `trailing_stop_loss` - New trailing stop loss distance (None = no change, Some(None) = remove)
+    pub async fn modify_trade_orders(
+        &self,
+        trade_id: &str,
+        take_profit: Option<Option<Decimal>>,
+        stop_loss: Option<Option<Decimal>>,
+        trailing_stop_loss: Option<Option<Decimal>>,
+    ) -> Result<TradeModifyResponse, OANDAHttpError> {
+        let endpoint = format!(
+            "{}/accounts/{}/trades/{}/orders",
+            OANDA_API_VERSION, self.account_id, trade_id
+        );
+
+        let mut body = json!({});
+
+        // Take Profit: None = no change, Some(None) = cancel, Some(Some(price)) = set
+        if let Some(tp) = take_profit {
+            if let Some(price) = tp {
+                body["takeProfit"] = json!({ "price": price.to_string() });
+            } else {
+                // Cancel the take profit order
+                body["takeProfit"] = json!({ "price": "" });
+            }
+        }
+
+        // Stop Loss: None = no change, Some(None) = cancel, Some(Some(price)) = set
+        if let Some(sl) = stop_loss {
+            if let Some(price) = sl {
+                body["stopLoss"] = json!({ "price": price.to_string() });
+            } else {
+                // Cancel the stop loss order
+                body["stopLoss"] = json!({ "price": "" });
+            }
+        }
+
+        // Trailing Stop Loss: None = no change, Some(None) = cancel, Some(Some(distance)) = set
+        if let Some(tsl) = trailing_stop_loss {
+            if let Some(distance) = tsl {
+                body["trailingStopLoss"] = json!({ "distance": distance.to_string() });
+            } else {
+                // Cancel the trailing stop loss order
+                body["trailingStopLoss"] = json!({ "distance": "" });
+            }
+        }
+
+        self.put(&endpoint, &body).await
     }
 
     /// Closes a specific trade.

@@ -63,7 +63,12 @@
 //! ```
 
 pub mod client;
+pub mod transaction_client;
 pub mod types;
 
 pub use client::OANDAStreamClient;
-pub use types::{StreamConfig, StreamMessage, StreamPrice, StreamHeartbeat, StreamError};
+pub use transaction_client::OANDATransactionStreamClient;
+pub use types::{
+    StreamConfig, StreamError, StreamHeartbeat, StreamMessage, StreamPrice,
+    StreamTransaction, TransactionStreamConfig, TransactionStreamMessage, TransactionType,
+};

@@ -31,7 +31,7 @@ use crate::{
     common::enums::OANDAEnvironment,
     config::{OANDADataClientConfig, OANDAExecClientConfig},
     http::client::OANDAHttpClient,
-    websocket::client::OANDAStreamClient,
+    websocket::{client::OANDAStreamClient, transaction_client::OANDATransactionStreamClient},
 };
 
 /// OANDA adapter Python module.
@@ -53,6 +53,7 @@ pub fn oanda(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     // Clients
     m.add_class::<OANDAHttpClient>()?;
     m.add_class::<OANDAStreamClient>()?;
+    m.add_class::<OANDATransactionStreamClient>()?;
 
     // Helper functions
     m.add_function(wrap_pyfunction!(enums::py_oanda_environment_from_str, m)?)?;

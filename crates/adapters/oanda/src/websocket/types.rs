@@ -292,6 +292,404 @@ pub struct StreamHeartbeat {
 }
 
 // ================================================================================================
+// Transaction Streaming Types
+// ================================================================================================
+
+/// Configuration for OANDA transaction streaming client.
+#[derive(Debug, Clone)]
+pub struct TransactionStreamConfig {
+    /// Trading environment (Practice or Live).
+    pub environment: OANDAEnvironment,
+
+    /// OANDA API key for authentication.
+    pub api_key: String,
+
+    /// OANDA account ID.
+    pub account_id: String,
+
+    /// Whether to include heartbeat messages (default: true).
+    pub include_heartbeats: bool,
+
+    /// Reconnection settings.
+    pub reconnect_on_error: bool,
+
+    /// Maximum reconnection attempts (0 = unlimited).
+    pub max_reconnect_attempts: u32,
+
+    /// Delay between reconnection attempts in milliseconds.
+    pub reconnect_delay_ms: u64,
+}
+
+impl Default for TransactionStreamConfig {
+    fn default() -> Self {
+        Self {
+            environment: OANDAEnvironment::Practice,
+            api_key: String::new(),
+            account_id: String::new(),
+            include_heartbeats: true,
+            reconnect_on_error: true,
+            max_reconnect_attempts: 10,
+            reconnect_delay_ms: 1000,
+        }
+    }
+}
+
+impl TransactionStreamConfig {
+    /// Create a new transaction stream configuration.
+    pub fn new(
+        environment: OANDAEnvironment,
+        api_key: impl Into<String>,
+        account_id: impl Into<String>,
+    ) -> Self {
+        Self {
+            environment,
+            api_key: api_key.into(),
+            account_id: account_id.into(),
+            ..Default::default()
+        }
+    }
+
+    /// Get the transaction streaming URL for this configuration.
+    #[must_use]
+    pub fn streaming_url(&self) -> String {
+        let base = match self.environment {
+            OANDAEnvironment::Practice => "https://stream-fxpractice.oanda.com",
+            OANDAEnvironment::Live => "https://stream-fxtrade.oanda.com",
+        };
+
+        format!(
+            "{}/v3/accounts/{}/transactions/stream",
+            base, self.account_id
+        )
+    }
+
+    /// Validate the configuration.
+    pub fn validate(&self) -> Result<(), StreamError> {
+        if self.api_key.is_empty() {
+            return Err(StreamError::Configuration("API key is required".into()));
+        }
+        if self.account_id.is_empty() {
+            return Err(StreamError::Configuration("Account ID is required".into()));
+        }
+        Ok(())
+    }
+}
+
+/// Message received from OANDA transaction streaming API.
+#[derive(Debug, Clone)]
+pub enum TransactionStreamMessage {
+    /// Transaction event.
+    Transaction(StreamTransaction),
+
+    /// Heartbeat message (connection keepalive).
+    Heartbeat(StreamHeartbeat),
+}
+
+/// Raw message from OANDA transaction streaming API (for deserialization).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub enum RawTransactionStreamMessage {
+    /// Heartbeat message.
+    Heartbeat(TransactionHeartbeat),
+
+    /// Transaction message.
+    Transaction(RawStreamTransaction),
+}
+
+/// Heartbeat for transaction stream (different format than price stream).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TransactionHeartbeat {
+    /// Message type (should be "HEARTBEAT").
+    #[serde(rename = "type")]
+    pub msg_type: String,
+
+    /// Last transaction ID at heartbeat time.
+    #[serde(rename = "lastTransactionID")]
+    pub last_transaction_id: String,
+
+    /// Heartbeat timestamp (RFC3339 format).
+    pub time: String,
+}
+
+/// Raw transaction from OANDA streaming API.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RawStreamTransaction {
+    /// Transaction ID.
+    pub id: String,
+
+    /// Account ID.
+    #[serde(rename = "accountID")]
+    pub account_id: String,
+
+    /// Transaction time (RFC3339 format).
+    pub time: String,
+
+    /// Transaction type (ORDER_FILL, ORDER_CANCEL, STOP_LOSS_ORDER, etc.).
+    #[serde(rename = "type")]
+    pub transaction_type: String,
+
+    // Order-related fields
+    /// Order ID (for order transactions).
+    #[serde(default, rename = "orderID")]
+    pub order_id: Option<String>,
+
+    /// Trade ID (for trade-related transactions).
+    #[serde(default, rename = "tradeID")]
+    pub trade_id: Option<String>,
+
+    /// Instrument.
+    #[serde(default)]
+    pub instrument: Option<String>,
+
+    /// Units.
+    #[serde(default)]
+    pub units: Option<String>,
+
+    /// Price.
+    #[serde(default)]
+    pub price: Option<String>,
+
+    /// Profit/Loss.
+    #[serde(default)]
+    pub pl: Option<String>,
+
+    /// Reason for the transaction.
+    #[serde(default)]
+    pub reason: Option<String>,
+
+    /// Account balance after transaction.
+    #[serde(default)]
+    pub account_balance: Option<String>,
+
+    /// Time in force.
+    #[serde(default)]
+    pub time_in_force: Option<String>,
+
+    /// Trade opened ID (for fills that open new trades).
+    #[serde(default, rename = "tradeOpened")]
+    pub trade_opened: Option<TradeOpened>,
+
+    /// Trade reduced (for partial closes).
+    #[serde(default, rename = "tradeReduced")]
+    pub trade_reduced: Option<TradeReduced>,
+
+    /// Trades closed (for full closes).
+    #[serde(default, rename = "tradesClosed")]
+    pub trades_closed: Option<Vec<TradeClosed>>,
+
+    /// Full price (for order fills).
+    #[serde(default, rename = "fullPrice")]
+    pub full_price: Option<serde_json::Value>,
+}
+
+/// Trade opened in a fill transaction.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TradeOpened {
+    /// Trade ID.
+    #[serde(rename = "tradeID")]
+    pub trade_id: String,
+
+    /// Units opened.
+    pub units: String,
+
+    /// Initial margin required.
+    #[serde(default)]
+    pub initial_margin_required: Option<String>,
+}
+
+/// Trade reduced in a fill transaction.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TradeReduced {
+    /// Trade ID.
+    #[serde(rename = "tradeID")]
+    pub trade_id: String,
+
+    /// Units reduced.
+    pub units: String,
+
+    /// Realized P/L.
+    #[serde(default, rename = "realizedPL")]
+    pub realized_pl: Option<String>,
+}
+
+/// Trade closed in a fill transaction.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TradeClosed {
+    /// Trade ID.
+    #[serde(rename = "tradeID")]
+    pub trade_id: String,
+
+    /// Units closed.
+    pub units: String,
+
+    /// Realized P/L.
+    #[serde(default, rename = "realizedPL")]
+    pub realized_pl: Option<String>,
+}
+
+/// Processed streaming transaction.
+#[derive(Debug, Clone)]
+pub struct StreamTransaction {
+    /// Transaction ID.
+    pub id: String,
+
+    /// Account ID.
+    pub account_id: String,
+
+    /// Transaction time (RFC3339 format).
+    pub time: String,
+
+    /// Transaction type.
+    pub transaction_type: TransactionType,
+
+    /// Order ID (if applicable).
+    pub order_id: Option<String>,
+
+    /// Trade ID (if applicable).
+    pub trade_id: Option<String>,
+
+    /// Instrument (if applicable).
+    pub instrument: Option<String>,
+
+    /// Units (if applicable).
+    pub units: Option<f64>,
+
+    /// Price (if applicable).
+    pub price: Option<f64>,
+
+    /// Profit/Loss (if applicable).
+    pub pl: Option<f64>,
+
+    /// Reason for the transaction.
+    pub reason: Option<String>,
+
+    /// Account balance after transaction.
+    pub account_balance: Option<f64>,
+
+    /// Raw transaction data for full access.
+    pub raw: RawStreamTransaction,
+}
+
+/// Transaction types from OANDA.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TransactionType {
+    /// Market order fill.
+    OrderFill,
+
+    /// Order cancelled.
+    OrderCancel,
+
+    /// Market order created.
+    MarketOrder,
+
+    /// Limit order created.
+    LimitOrder,
+
+    /// Stop order created.
+    StopOrder,
+
+    /// Take profit order created.
+    TakeProfitOrder,
+
+    /// Stop loss order created.
+    StopLossOrder,
+
+    /// Trailing stop loss order created.
+    TrailingStopLossOrder,
+
+    /// Market-if-touched order created.
+    MarketIfTouchedOrder,
+
+    /// Trade client extensions modified.
+    TradeClientExtensionsModify,
+
+    /// Order client extensions modified.
+    OrderClientExtensionsModify,
+
+    /// Daily financing.
+    DailyFinancing,
+
+    /// Dividend adjustment.
+    DividendAdjustment,
+
+    /// Transfer funds.
+    TransferFunds,
+
+    /// Reset resettable PL.
+    ResetResettablePL,
+
+    /// Unknown transaction type.
+    Unknown,
+}
+
+impl From<&str> for TransactionType {
+    fn from(s: &str) -> Self {
+        match s {
+            "ORDER_FILL" => TransactionType::OrderFill,
+            "ORDER_CANCEL" => TransactionType::OrderCancel,
+            "MARKET_ORDER" => TransactionType::MarketOrder,
+            "LIMIT_ORDER" => TransactionType::LimitOrder,
+            "STOP_ORDER" => TransactionType::StopOrder,
+            "TAKE_PROFIT_ORDER" => TransactionType::TakeProfitOrder,
+            "STOP_LOSS_ORDER" => TransactionType::StopLossOrder,
+            "TRAILING_STOP_LOSS_ORDER" => TransactionType::TrailingStopLossOrder,
+            "MARKET_IF_TOUCHED_ORDER" => TransactionType::MarketIfTouchedOrder,
+            "TRADE_CLIENT_EXTENSIONS_MODIFY" => TransactionType::TradeClientExtensionsModify,
+            "ORDER_CLIENT_EXTENSIONS_MODIFY" => TransactionType::OrderClientExtensionsModify,
+            "DAILY_FINANCING" => TransactionType::DailyFinancing,
+            "DIVIDEND_ADJUSTMENT" => TransactionType::DividendAdjustment,
+            "TRANSFER_FUNDS" => TransactionType::TransferFunds,
+            "RESET_RESETTABLE_PL" => TransactionType::ResetResettablePL,
+            _ => TransactionType::Unknown,
+        }
+    }
+}
+
+impl From<RawStreamTransaction> for StreamTransaction {
+    fn from(raw: RawStreamTransaction) -> Self {
+        let transaction_type = TransactionType::from(raw.transaction_type.as_str());
+        let units = raw.units.as_ref().and_then(|s| s.parse::<f64>().ok());
+        let price = raw.price.as_ref().and_then(|s| s.parse::<f64>().ok());
+        let pl = raw.pl.as_ref().and_then(|s| s.parse::<f64>().ok());
+        let account_balance = raw.account_balance.as_ref().and_then(|s| s.parse::<f64>().ok());
+
+        Self {
+            id: raw.id.clone(),
+            account_id: raw.account_id.clone(),
+            time: raw.time.clone(),
+            transaction_type,
+            order_id: raw.order_id.clone(),
+            trade_id: raw.trade_id.clone(),
+            instrument: raw.instrument.clone(),
+            units,
+            price,
+            pl,
+            reason: raw.reason.clone(),
+            account_balance,
+            raw,
+        }
+    }
+}
+
+impl From<RawTransactionStreamMessage> for TransactionStreamMessage {
+    fn from(raw: RawTransactionStreamMessage) -> Self {
+        match raw {
+            RawTransactionStreamMessage::Heartbeat(h) => {
+                TransactionStreamMessage::Heartbeat(StreamHeartbeat { time: h.time })
+            }
+            RawTransactionStreamMessage::Transaction(t) => {
+                TransactionStreamMessage::Transaction(t.into())
+            }
+        }
+    }
+}
+
+// ================================================================================================
 // Errors
 // ================================================================================================
 
