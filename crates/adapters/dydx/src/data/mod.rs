@@ -23,6 +23,7 @@ use std::sync::{
 use anyhow::Context;
 use dashmap::DashMap;
 use nautilus_common::{
+    clients::DataClient,
     live::{runner::get_data_event_sender, runtime::get_runtime},
     messages::{
         DataEvent, DataResponse,
@@ -40,18 +41,21 @@ use nautilus_core::{
     datetime::datetime_to_unix_nanos,
     time::{AtomicTime, get_atomic_clock_realtime},
 };
-use nautilus_data::client::DataClient;
 use nautilus_model::{
     data::{
         Bar, BarSpecification, BarType, BookOrder, Data as NautilusData, IndexPriceUpdate,
-        OrderBookDelta, OrderBookDeltas, OrderBookDeltas_API, QuoteTick,
+        OrderBookDelta, OrderBookDeltas, OrderBookDeltas_API, QuoteTick, TradeTick,
     },
-    enums::{BarAggregation, BookAction, BookType, OrderSide, RecordFlag},
-    identifiers::{ClientId, InstrumentId, Venue},
+    enums::{
+        AggregationSource, AggressorSide, BarAggregation, BookAction, BookType, OrderSide,
+        PriceType, RecordFlag,
+    },
+    identifiers::{ClientId, InstrumentId, TradeId, Venue},
     instruments::{Instrument, InstrumentAny},
     orderbook::OrderBook,
-    types::{Price, Quantity, price::PriceRaw},
+    types::{Price, Quantity},
 };
+use rust_decimal::Decimal;
 use tokio::{task::JoinHandle, time::Duration};
 use tokio_util::sync::CancellationToken;
 use ustr::Ustr;
@@ -65,16 +69,16 @@ use crate::{
 };
 
 /// Groups WebSocket message handling dependencies.
-struct WsMessageContext<'a> {
-    data_sender: &'a tokio::sync::mpsc::UnboundedSender<DataEvent>,
-    instruments: &'a Arc<DashMap<Ustr, InstrumentAny>>,
-    order_books: &'a Arc<DashMap<InstrumentId, OrderBook>>,
-    last_quotes: &'a Arc<DashMap<InstrumentId, QuoteTick>>,
-    ws_client: &'a Option<DydxWebSocketClient>,
-    active_orderbook_subs: &'a Arc<DashMap<InstrumentId, ()>>,
-    active_trade_subs: &'a Arc<DashMap<InstrumentId, ()>>,
-    active_bar_subs: &'a Arc<DashMap<(InstrumentId, String), BarType>>,
-    incomplete_bars: &'a Arc<DashMap<BarType, Bar>>,
+struct WsMessageContext {
+    data_sender: tokio::sync::mpsc::UnboundedSender<DataEvent>,
+    instruments: Arc<DashMap<Ustr, InstrumentAny>>,
+    order_books: Arc<DashMap<InstrumentId, OrderBook>>,
+    last_quotes: Arc<DashMap<InstrumentId, QuoteTick>>,
+    ws_client: DydxWebSocketClient,
+    active_orderbook_subs: Arc<DashMap<InstrumentId, ()>>,
+    active_trade_subs: Arc<DashMap<InstrumentId, ()>>,
+    active_bar_subs: Arc<DashMap<(InstrumentId, String), BarType>>,
+    incomplete_bars: Arc<DashMap<BarType, Bar>>,
 }
 
 /// dYdX data client for live market data streaming and historical data requests.
@@ -86,14 +90,16 @@ struct WsMessageContext<'a> {
 /// - Connection lifecycle management
 #[derive(Debug)]
 pub struct DydxDataClient {
+    /// High-resolution clock for timestamps.
+    clock: &'static AtomicTime,
     /// The client ID for this data client.
     client_id: ClientId,
     /// Configuration for the data client.
     config: DydxDataClientConfig,
     /// HTTP client for REST API requests.
     http_client: DydxHttpClient,
-    /// WebSocket client for real-time data streaming (optional).
-    ws_client: Option<DydxWebSocketClient>,
+    /// WebSocket client for real-time data streaming.
+    ws_client: DydxWebSocketClient,
     /// Whether the client is currently connected.
     is_connected: AtomicBool,
     /// Cancellation token for async operations.
@@ -104,8 +110,6 @@ pub struct DydxDataClient {
     data_sender: tokio::sync::mpsc::UnboundedSender<DataEvent>,
     /// Cached instruments by symbol (shared with HTTP client via `Arc<DashMap<Ustr, InstrumentAny>>`).
     instruments: Arc<DashMap<Ustr, InstrumentAny>>,
-    /// High-resolution clock for timestamps.
-    clock: &'static AtomicTime,
     /// Local order books maintained for generating quotes and resolving crosses.
     order_books: Arc<DashMap<InstrumentId, OrderBook>>,
     /// Last quote tick per instrument (used for quote generation from book deltas).
@@ -160,15 +164,14 @@ impl DydxDataClient {
         client_id: ClientId,
         config: DydxDataClientConfig,
         http_client: DydxHttpClient,
-        ws_client: Option<DydxWebSocketClient>,
+        ws_client: DydxWebSocketClient,
     ) -> anyhow::Result<Self> {
         let clock = get_atomic_clock_realtime();
         let data_sender = get_data_event_sender();
-
-        // Clone the instruments cache before moving http_client
         let instruments_cache = http_client.instruments().clone();
 
         Ok(Self {
+            clock,
             client_id,
             config,
             http_client,
@@ -178,7 +181,6 @@ impl DydxDataClient {
             tasks: Vec::new(),
             data_sender,
             instruments: instruments_cache,
-            clock,
             order_books: Arc::new(DashMap::new()),
             last_quotes: Arc::new(DashMap::new()),
             incomplete_bars: Arc::new(DashMap::new()),
@@ -193,19 +195,6 @@ impl DydxDataClient {
     #[must_use]
     pub fn venue(&self) -> Venue {
         *DYDX_VENUE
-    }
-
-    fn ws_client(&self) -> anyhow::Result<&DydxWebSocketClient> {
-        self.ws_client
-            .as_ref()
-            .context("websocket client not initialized; call connect first")
-    }
-
-    /// Mutable WebSocket client access for operations requiring mutable references.
-    fn ws_client_mut(&mut self) -> anyhow::Result<&mut DydxWebSocketClient> {
-        self.ws_client
-            .as_mut()
-            .context("websocket client not initialized; call connect first")
     }
 
     /// Returns `true` when the client is connected.
@@ -243,9 +232,6 @@ impl DydxDataClient {
     /// - Instrument parsing fails.
     ///
     async fn bootstrap_instruments(&mut self) -> anyhow::Result<Vec<InstrumentAny>> {
-        log::info!("Bootstrapping dYdX instruments");
-
-        // Populates all HTTP cache layers (instruments, clob_pair_id, market_params)
         self.http_client
             .fetch_and_cache_instruments()
             .await
@@ -259,15 +245,13 @@ impl DydxDataClient {
             .collect();
 
         if instruments.is_empty() {
-            log::warn!("No dYdX instruments were loaded");
+            log::warn!("No instruments were loaded");
             return Ok(instruments);
         }
 
-        log::info!("Loaded {} dYdX instruments", instruments.len());
+        log::info!("Loaded {} instruments", instruments.len());
 
-        if let Some(ref ws) = self.ws_client {
-            ws.cache_instruments(instruments.clone());
-        }
+        self.ws_client.cache_instruments(instruments.clone());
 
         Ok(instruments)
     }
@@ -285,7 +269,7 @@ impl DataClient for DydxDataClient {
 
     fn start(&mut self) -> anyhow::Result<()> {
         log::info!(
-            "Starting dYdX data client: client_id={}, is_testnet={}",
+            "Starting: client_id={}, is_testnet={}",
             self.client_id,
             self.http_client.is_testnet()
         );
@@ -293,14 +277,14 @@ impl DataClient for DydxDataClient {
     }
 
     fn stop(&mut self) -> anyhow::Result<()> {
-        log::info!("Stopping dYdX data client {}", self.client_id);
+        log::info!("Stopping {}", self.client_id);
         self.cancellation_token.cancel();
         self.is_connected.store(false, Ordering::Relaxed);
         Ok(())
     }
 
     fn reset(&mut self) -> anyhow::Result<()> {
-        log::debug!("Resetting dYdX data client {}", self.client_id);
+        log::debug!("Resetting {}", self.client_id);
         self.is_connected.store(false, Ordering::Relaxed);
         self.cancellation_token = CancellationToken::new();
         self.tasks.clear();
@@ -308,7 +292,7 @@ impl DataClient for DydxDataClient {
     }
 
     fn dispose(&mut self) -> anyhow::Result<()> {
-        log::debug!("Disposing dYdX data client {}", self.client_id);
+        log::debug!("Disposing {}", self.client_id);
         self.stop()
     }
 
@@ -317,56 +301,59 @@ impl DataClient for DydxDataClient {
             return Ok(());
         }
 
-        log::info!("Connecting dYdX data client");
+        log::info!("Connecting");
 
         // Bootstrap instruments first
         self.bootstrap_instruments().await?;
 
         // Connect WebSocket client and subscribe to market updates
-        if self.ws_client.is_some() {
-            let ws = self.ws_client_mut()?;
+        self.ws_client
+            .connect()
+            .await
+            .context("failed to connect dYdX websocket")?;
 
-            ws.connect()
-                .await
-                .context("failed to connect dYdX websocket")?;
+        self.ws_client
+            .subscribe_markets()
+            .await
+            .context("failed to subscribe to markets channel")?;
 
-            ws.subscribe_markets()
-                .await
-                .context("failed to subscribe to markets channel")?;
+        // Start message processing task (handler already converts to NautilusWsMessage)
+        if let Some(rx) = self.ws_client.take_receiver() {
+            log::debug!("Starting message processing task");
+            let data_tx = self.data_sender.clone();
+            let instruments = self.instruments.clone();
+            let order_books = self.order_books.clone();
+            let last_quotes = self.last_quotes.clone();
+            let ws_client = self.ws_client.clone();
+            let active_orderbook_subs = self.active_orderbook_subs.clone();
+            let active_trade_subs = self.active_trade_subs.clone();
+            let active_bar_subs = self.active_bar_subs.clone();
+            let incomplete_bars = self.incomplete_bars.clone();
 
-            // Start message processing task (handler already converts to NautilusWsMessage)
-            if let Some(rx) = ws.take_receiver() {
-                let data_tx = self.data_sender.clone();
-                let instruments = self.instruments.clone();
-                let order_books = self.order_books.clone();
-                let last_quotes = self.last_quotes.clone();
-                let ws_client = self.ws_client.clone();
-                let active_orderbook_subs = self.active_orderbook_subs.clone();
-                let active_trade_subs = self.active_trade_subs.clone();
-                let active_bar_subs = self.active_bar_subs.clone();
-                let incomplete_bars = self.incomplete_bars.clone();
+            let ctx = WsMessageContext {
+                data_sender: data_tx,
+                instruments,
+                order_books,
+                last_quotes,
+                ws_client,
+                active_orderbook_subs,
+                active_trade_subs,
+                active_bar_subs,
+                incomplete_bars,
+            };
 
-                let task = get_runtime().spawn(async move {
-                    let mut rx = rx;
-                    while let Some(msg) = rx.recv().await {
-                        let ctx = WsMessageContext {
-                            data_sender: &data_tx,
-                            instruments: &instruments,
-                            order_books: &order_books,
-                            last_quotes: &last_quotes,
-                            ws_client: &ws_client,
-                            active_orderbook_subs: &active_orderbook_subs,
-                            active_trade_subs: &active_trade_subs,
-                            active_bar_subs: &active_bar_subs,
-                            incomplete_bars: &incomplete_bars,
-                        };
-                        Self::handle_ws_message(msg, &ctx);
-                    }
-                });
-                self.tasks.push(task);
-            } else {
-                log::warn!("No inbound WS receiver available after connect");
-            }
+            let task = get_runtime().spawn(async move {
+                log::debug!("Message processing task started");
+                let mut rx = rx;
+
+                while let Some(msg) = rx.recv().await {
+                    Self::handle_ws_message(msg, &ctx);
+                }
+                log::debug!("Message processing task ended (channel closed)");
+            });
+            self.tasks.push(task);
+        } else {
+            log::error!("No inbound WS receiver available after connect");
         }
 
         // Start orderbook snapshot refresh task
@@ -376,7 +363,7 @@ impl DataClient for DydxDataClient {
         self.start_instrument_refresh_task()?;
 
         self.is_connected.store(true, Ordering::Relaxed);
-        log::info!("Connected dYdX data client");
+        log::info!("Connected");
 
         Ok(())
     }
@@ -386,14 +373,12 @@ impl DataClient for DydxDataClient {
             return Ok(());
         }
 
-        log::info!("Disconnecting dYdX data client");
+        log::info!("Disconnecting");
 
-        // Disconnect WebSocket client if present
-        if let Some(ref mut ws) = self.ws_client {
-            ws.disconnect()
-                .await
-                .context("failed to disconnect dYdX websocket")?;
-        }
+        self.ws_client
+            .disconnect()
+            .await
+            .context("failed to disconnect dYdX websocket")?;
 
         self.is_connected.store(false, Ordering::Relaxed);
         log::info!("Disconnected dYdX data client");
@@ -431,15 +416,31 @@ impl DataClient for DydxDataClient {
         Ok(())
     }
 
-    fn subscribe_instrument(&mut self, _cmd: &SubscribeInstrument) -> anyhow::Result<()> {
-        // dYdX markets channel auto-subscribes to all instruments
-        // Individual instrument subscriptions not supported - full feed only
-        log::debug!("subscribe_instrument: dYdX auto-subscribes via markets channel");
+    fn subscribe_instrument(&mut self, cmd: &SubscribeInstrument) -> anyhow::Result<()> {
+        // dYdX instruments are already cached from HTTP during connect()
+        // Look up and send the requested instrument to the data engine
+        let symbol = cmd.instrument_id.symbol.inner();
+
+        if let Some(instrument) = self.instruments.get(&symbol) {
+            log::debug!("Sending cached instrument for {}", cmd.instrument_id);
+            if let Err(e) = self
+                .data_sender
+                .send(DataEvent::Instrument(instrument.clone()))
+            {
+                log::warn!("Failed to send instrument {}: {e}", cmd.instrument_id);
+            }
+        } else {
+            log::warn!(
+                "Instrument {} not found in cache (available: {})",
+                cmd.instrument_id,
+                self.instruments.len()
+            );
+        }
         Ok(())
     }
 
     fn subscribe_trades(&mut self, cmd: &SubscribeTrades) -> anyhow::Result<()> {
-        let ws = self.ws_client()?.clone();
+        let ws = self.ws_client.clone();
         let instrument_id = cmd.instrument_id;
 
         // Track active subscription for reconnection recovery
@@ -471,7 +472,7 @@ impl DataClient for DydxDataClient {
         // Track active subscription for periodic refresh
         self.active_orderbook_subs.insert(cmd.instrument_id, ());
 
-        let ws = self.ws_client()?.clone();
+        let ws = self.ws_client.clone();
         let instrument_id = cmd.instrument_id;
 
         self.spawn_ws(
@@ -512,7 +513,7 @@ impl DataClient for DydxDataClient {
     }
 
     fn subscribe_bars(&mut self, cmd: &SubscribeBars) -> anyhow::Result<()> {
-        let ws = self.ws_client()?.clone();
+        let ws = self.ws_client.clone();
         let instrument_id = cmd.bar_type.instrument_id();
         let spec = cmd.bar_type.spec();
 
@@ -558,7 +559,7 @@ impl DataClient for DydxDataClient {
         // Remove from active subscription tracking
         self.active_trade_subs.remove(&cmd.instrument_id);
 
-        let ws = self.ws_client()?.clone();
+        let ws = self.ws_client.clone();
         let instrument_id = cmd.instrument_id;
 
         self.spawn_ws(
@@ -577,7 +578,7 @@ impl DataClient for DydxDataClient {
         // Remove from active subscription tracking
         self.active_orderbook_subs.remove(&cmd.instrument_id);
 
-        let ws = self.ws_client()?.clone();
+        let ws = self.ws_client.clone();
         let instrument_id = cmd.instrument_id;
 
         self.spawn_ws(
@@ -613,7 +614,7 @@ impl DataClient for DydxDataClient {
     }
 
     fn unsubscribe_bars(&mut self, cmd: &UnsubscribeBars) -> anyhow::Result<()> {
-        let ws = self.ws_client()?.clone();
+        let ws = self.ws_client.clone();
         let instrument_id = cmd.bar_type.instrument_id();
         let spec = cmd.bar_type.spec();
 
@@ -814,12 +815,6 @@ impl DataClient for DydxDataClient {
     }
 
     fn request_trades(&self, request: &RequestTrades) -> anyhow::Result<()> {
-        use nautilus_model::{
-            data::TradeTick,
-            enums::{AggressorSide, OrderSide},
-            identifiers::TradeId,
-        };
-
         let http = self.http_client.clone();
         let instruments = self.instruments.clone();
         let sender = self.data_sender.clone();
@@ -985,8 +980,6 @@ impl DataClient for DydxDataClient {
     }
 
     fn request_bars(&self, request: &RequestBars) -> anyhow::Result<()> {
-        use nautilus_model::enums::{AggregationSource, BarAggregation, PriceType};
-
         const DYDX_MAX_BARS_PER_REQUEST: u32 = 1_000;
 
         let bar_type = request.bar_type;
@@ -1323,7 +1316,7 @@ impl DydxDataClient {
 
             loop {
                 tokio::select! {
-                    _ = cancellation_token.cancelled() => {
+                    () = cancellation_token.cancelled() => {
                         log::info!("Instrument refresh task cancelled");
                         break;
                     }
@@ -1346,9 +1339,7 @@ impl DydxDataClient {
                                 }
 
                                 // Propagate to WS handler for message parsing
-                                if let Some(ref ws) = ws_client {
-                                    ws.cache_instruments(instruments);
-                                }
+                                ws_client.cache_instruments(instruments);
                             }
                             Err(e) => {
                                 log::error!("Failed to refresh instruments: {e}");
@@ -1397,7 +1388,7 @@ impl DydxDataClient {
 
             loop {
                 tokio::select! {
-                    _ = cancellation_token.cancelled() => {
+                    () = cancellation_token.cancelled() => {
                         log::info!("Orderbook refresh task cancelled");
                         break;
                     }
@@ -1500,13 +1491,6 @@ impl DydxDataClient {
         snapshot: &crate::http::models::OrderbookResponse,
         instrument: &InstrumentAny,
     ) -> anyhow::Result<OrderBookDeltas> {
-        use nautilus_model::{
-            data::{BookOrder, OrderBookDelta},
-            enums::{BookAction, OrderSide, RecordFlag},
-            instruments::Instrument,
-            types::{Price, Quantity},
-        };
-
         let ts_init = get_atomic_clock_realtime().get_time_ns();
         let mut deltas = Vec::new();
 
@@ -1578,6 +1562,22 @@ impl DydxDataClient {
         self.instruments.iter().map(|i| i.clone()).collect()
     }
 
+    /// Cache a single instrument.
+    pub fn cache_instrument(&self, instrument: InstrumentAny) {
+        let symbol_key = Ustr::from(instrument.id().symbol.as_str());
+        self.instruments.insert(symbol_key, instrument);
+    }
+
+    /// Cache multiple instruments.
+    ///
+    /// Clears the existing cache first, then adds all provided instruments.
+    pub fn cache_instruments(&self, instruments: Vec<InstrumentAny>) {
+        self.instruments.clear();
+        for instrument in instruments {
+            self.cache_instrument(instrument);
+        }
+    }
+
     fn ensure_order_book(&self, instrument_id: InstrumentId, book_type: BookType) {
         self.order_books
             .entry(instrument_id)
@@ -1615,8 +1615,6 @@ impl DydxDataClient {
         bar_secs: i64,
         clock: &AtomicTime,
     ) -> anyhow::Result<Bar> {
-        use anyhow::Context;
-
         // Convert candle start time to UnixNanos (ts_init).
         let ts_init =
             datetime_to_unix_nanos(Some(candle.started_at)).unwrap_or_else(|| clock.get_time_ns());
@@ -1651,19 +1649,19 @@ impl DydxDataClient {
     ) {
         match message {
             crate::websocket::enums::NautilusWsMessage::Data(payloads) => {
-                Self::handle_data_message(payloads, ctx.data_sender, ctx.incomplete_bars);
+                Self::handle_data_message(payloads, &ctx.data_sender, &ctx.incomplete_bars);
             }
             crate::websocket::enums::NautilusWsMessage::Deltas(deltas) => {
                 Self::handle_deltas_message(
                     *deltas,
-                    ctx.data_sender,
-                    ctx.order_books,
-                    ctx.last_quotes,
-                    ctx.instruments,
+                    &ctx.data_sender,
+                    &ctx.order_books,
+                    &ctx.last_quotes,
+                    &ctx.instruments,
                 );
             }
             crate::websocket::enums::NautilusWsMessage::OraclePrices(oracle_prices) => {
-                Self::handle_oracle_prices(oracle_prices, ctx.instruments, ctx.data_sender);
+                Self::handle_oracle_prices(oracle_prices, &ctx.instruments, &ctx.data_sender);
             }
             crate::websocket::enums::NautilusWsMessage::Error(err) => {
                 log::error!("dYdX WS error: {err}");
@@ -1671,96 +1669,91 @@ impl DydxDataClient {
             crate::websocket::enums::NautilusWsMessage::Reconnected => {
                 log::info!("dYdX WS reconnected - re-subscribing to active subscriptions");
 
-                // Re-subscribe to all active subscriptions after WebSocket reconnection
-                if let Some(ws) = ctx.ws_client {
-                    let total_subs = ctx.active_orderbook_subs.len()
-                        + ctx.active_trade_subs.len()
-                        + ctx.active_bar_subs.len();
+                let total_subs = ctx.active_orderbook_subs.len()
+                    + ctx.active_trade_subs.len()
+                    + ctx.active_bar_subs.len();
 
-                    if total_subs == 0 {
-                        log::debug!("No active subscriptions to restore");
-                        return;
+                if total_subs == 0 {
+                    log::debug!("No active subscriptions to restore");
+                    return;
+                }
+
+                log::info!(
+                    "Restoring {} subscriptions (orderbook={}, trades={}, bars={})",
+                    total_subs,
+                    ctx.active_orderbook_subs.len(),
+                    ctx.active_trade_subs.len(),
+                    ctx.active_bar_subs.len()
+                );
+
+                // Re-subscribe to orderbook channels
+                for entry in ctx.active_orderbook_subs.iter() {
+                    let instrument_id = *entry.key();
+                    let ws_clone = ctx.ws_client.clone();
+                    get_runtime().spawn(async move {
+                        if let Err(e) = ws_clone.subscribe_orderbook(instrument_id).await {
+                            log::error!(
+                                "Failed to re-subscribe to orderbook for {instrument_id}: {e:?}"
+                            );
+                        } else {
+                            log::debug!("Re-subscribed to orderbook for {instrument_id}");
+                        }
+                    });
+                }
+
+                // Re-subscribe to trade channels
+                for entry in ctx.active_trade_subs.iter() {
+                    let instrument_id = *entry.key();
+                    let ws_clone = ctx.ws_client.clone();
+                    get_runtime().spawn(async move {
+                        if let Err(e) = ws_clone.subscribe_trades(instrument_id).await {
+                            log::error!(
+                                "Failed to re-subscribe to trades for {instrument_id}: {e:?}"
+                            );
+                        } else {
+                            log::debug!("Re-subscribed to trades for {instrument_id}");
+                        }
+                    });
+                }
+
+                // Re-subscribe to candle/bar channels
+                for entry in ctx.active_bar_subs.iter() {
+                    let (instrument_id, resolution) = entry.key();
+                    let instrument_id = *instrument_id;
+                    let resolution = resolution.clone();
+                    let bar_type = *entry.value();
+                    let ws_clone = ctx.ws_client.clone();
+
+                    // Re-register bar type with handler
+                    let ticker = extract_raw_symbol(instrument_id.symbol.as_str());
+                    let topic = format!("{ticker}/{resolution}");
+                    if let Err(e) = ctx.ws_client.send_command(
+                        crate::websocket::handler::HandlerCommand::RegisterBarType {
+                            topic,
+                            bar_type,
+                        },
+                    ) {
+                        log::warn!(
+                            "Failed to re-register bar type for {instrument_id} ({resolution}): {e}"
+                        );
                     }
 
-                    log::info!(
-                        "Restoring {} subscriptions (orderbook={}, trades={}, bars={})",
-                        total_subs,
-                        ctx.active_orderbook_subs.len(),
-                        ctx.active_trade_subs.len(),
-                        ctx.active_bar_subs.len()
-                    );
-
-                    // Re-subscribe to orderbook channels
-                    for entry in ctx.active_orderbook_subs.iter() {
-                        let instrument_id = *entry.key();
-                        let ws_clone = ws.clone();
-                        get_runtime().spawn(async move {
-                            if let Err(e) = ws_clone.subscribe_orderbook(instrument_id).await {
-                                log::error!(
-                                    "Failed to re-subscribe to orderbook for {instrument_id}: {e:?}"
-                                );
-                            } else {
-                                log::debug!("Re-subscribed to orderbook for {instrument_id}");
-                            }
-                        });
-                    }
-
-                    // Re-subscribe to trade channels
-                    for entry in ctx.active_trade_subs.iter() {
-                        let instrument_id = *entry.key();
-                        let ws_clone = ws.clone();
-                        get_runtime().spawn(async move {
-                            if let Err(e) = ws_clone.subscribe_trades(instrument_id).await {
-                                log::error!(
-                                    "Failed to re-subscribe to trades for {instrument_id}: {e:?}"
-                                );
-                            } else {
-                                log::debug!("Re-subscribed to trades for {instrument_id}");
-                            }
-                        });
-                    }
-
-                    // Re-subscribe to candle/bar channels
-                    for entry in ctx.active_bar_subs.iter() {
-                        let (instrument_id, resolution) = entry.key();
-                        let instrument_id = *instrument_id;
-                        let resolution = resolution.clone();
-                        let bar_type = *entry.value();
-                        let ws_clone = ws.clone();
-
-                        // Re-register bar type with handler
-                        let ticker = extract_raw_symbol(instrument_id.symbol.as_str());
-                        let topic = format!("{ticker}/{resolution}");
-                        if let Err(e) = ws.send_command(
-                            crate::websocket::handler::HandlerCommand::RegisterBarType {
-                                topic,
-                                bar_type,
-                            },
-                        ) {
-                            log::warn!(
-                                "Failed to re-register bar type for {instrument_id} ({resolution}): {e}"
+                    get_runtime().spawn(async move {
+                        if let Err(e) =
+                            ws_clone.subscribe_candles(instrument_id, &resolution).await
+                        {
+                            log::error!(
+                                "Failed to re-subscribe to candles for {instrument_id} ({resolution}): {e:?}"
+                            );
+                        } else {
+                            log::debug!(
+                                "Re-subscribed to candles for {instrument_id} ({resolution})"
                             );
                         }
-
-                        get_runtime().spawn(async move {
-                            if let Err(e) =
-                                ws_clone.subscribe_candles(instrument_id, &resolution).await
-                            {
-                                log::error!(
-                                    "Failed to re-subscribe to candles for {instrument_id} ({resolution}): {e:?}"
-                                );
-                            } else {
-                                log::debug!(
-                                    "Re-subscribed to candles for {instrument_id} ({resolution})"
-                                );
-                            }
-                        });
-                    }
-
-                    log::info!("Completed re-subscription requests after reconnection");
-                } else {
-                    log::warn!("WebSocket client not available for re-subscription");
+                    });
                 }
+
+                log::info!("Completed re-subscription requests after reconnection");
             }
             crate::websocket::enums::NautilusWsMessage::BlockHeight(_) => {
                 log::debug!(
@@ -2110,7 +2103,10 @@ impl DydxDataClient {
         let ts_init = get_atomic_clock_realtime().get_time_ns();
 
         for (symbol_str, oracle_market) in oracle_prices {
-            let symbol = Ustr::from(&symbol_str);
+            // Oracle prices use market format (e.g., "BTC-USD"), but instruments are keyed
+            // by perpetual symbol (e.g., "BTC-USD-PERP")
+            let perp_symbol = format!("{symbol_str}-PERP");
+            let symbol = Ustr::from(&perp_symbol);
 
             // Get instrument to access instrument_id
             let Some(instrument) = instruments.get(&symbol) else {
@@ -2124,18 +2120,20 @@ impl DydxDataClient {
 
             // Parse oracle price string to Price
             let oracle_price_str = &oracle_market.oracle_price;
-            let Ok(oracle_price_f64) = oracle_price_str.parse::<f64>() else {
+            let Ok(oracle_price_dec) = oracle_price_str.parse::<Decimal>() else {
                 log::error!(
-                    "Failed to parse oracle price as f64: symbol={symbol}, price_str={oracle_price_str}"
+                    "Failed to parse oracle price: symbol={symbol}, price_str={oracle_price_str}"
                 );
                 continue;
             };
 
             let price_precision = instrument.price_precision();
-            let oracle_price = Price::from_raw(
-                (oracle_price_f64 * 10_f64.powi(price_precision as i32)) as PriceRaw,
-                price_precision,
-            );
+            let Ok(oracle_price) = Price::from_decimal_dp(oracle_price_dec, price_precision) else {
+                log::error!(
+                    "Failed to create oracle Price: symbol={symbol}, price={oracle_price_dec}"
+                );
+                continue;
+            };
 
             let oracle_price_event = DydxOraclePrice::new(
                 instrument_id,
@@ -2216,6 +2214,10 @@ mod tests {
         .await;
     }
 
+    fn create_test_ws_client() -> DydxWebSocketClient {
+        DydxWebSocketClient::new_public("ws://test".to_string(), None)
+    }
+
     #[rstest]
     fn test_new_data_client() {
         setup_test_env();
@@ -2224,7 +2226,7 @@ mod tests {
         let config = DydxDataClientConfig::default();
         let http_client = DydxHttpClient::default();
 
-        let client = DydxDataClient::new(client_id, config, http_client, None);
+        let client = DydxDataClient::new(client_id, config, http_client, create_test_ws_client());
         assert!(client.is_ok());
 
         let client = client.unwrap();
@@ -2241,7 +2243,8 @@ mod tests {
         let config = DydxDataClientConfig::default();
         let http_client = DydxHttpClient::default();
 
-        let mut client = DydxDataClient::new(client_id, config, http_client, None).unwrap();
+        let mut client =
+            DydxDataClient::new(client_id, config, http_client, create_test_ws_client()).unwrap();
 
         // Test start
         assert!(client.start().is_ok());
@@ -2265,7 +2268,8 @@ mod tests {
         let config = DydxDataClientConfig::default();
         let http_client = DydxHttpClient::default();
 
-        let mut client = DydxDataClient::new(client_id, config, http_client, None).unwrap();
+        let mut client =
+            DydxDataClient::new(client_id, config, http_client, create_test_ws_client()).unwrap();
 
         let venue = *DYDX_VENUE;
         let command_id = UUID4::new();
@@ -2294,7 +2298,8 @@ mod tests {
         let config = DydxDataClientConfig::default();
         let http_client = DydxHttpClient::default();
 
-        let client = DydxDataClient::new(client_id, config, http_client, None).unwrap();
+        let client =
+            DydxDataClient::new(client_id, config, http_client, create_test_ws_client()).unwrap();
 
         let instrument_id = InstrumentId::from("BTC-USD-PERP.DYDX");
         let spec = BarSpecification {
@@ -2352,7 +2357,8 @@ mod tests {
         let config = DydxDataClientConfig::default();
         let http_client = DydxHttpClient::default();
 
-        let client = DydxDataClient::new(client_id, config, http_client, None).unwrap();
+        let client =
+            DydxDataClient::new(client_id, config, http_client, create_test_ws_client()).unwrap();
 
         let instrument_id = InstrumentId::from("ETH-USD-PERP.DYDX");
         let spec = BarSpecification {
@@ -2384,7 +2390,8 @@ mod tests {
         let config = DydxDataClientConfig::default();
         let http_client = DydxHttpClient::default();
 
-        let client = DydxDataClient::new(client_id, config, http_client, None).unwrap();
+        let client =
+            DydxDataClient::new(client_id, config, http_client, create_test_ws_client()).unwrap();
 
         // Lookup non-existent topic
         assert!(client.get_bar_type_for_topic("NONEXISTENT/1MIN").is_none());
@@ -2399,7 +2406,7 @@ mod tests {
         let instruments = Arc::new(DashMap::new());
         let order_books = Arc::new(DashMap::new());
         let last_quotes = Arc::new(DashMap::new());
-        let ws_client: Option<DydxWebSocketClient> = None;
+        let ws_client = DydxWebSocketClient::new_public("ws://test".to_string(), None);
         let active_orderbook_subs = Arc::new(DashMap::new());
         let active_trade_subs = Arc::new(DashMap::new());
         let active_bar_subs = Arc::new(DashMap::new());
@@ -2408,7 +2415,6 @@ mod tests {
         let bar_ts = get_atomic_clock_realtime().get_time_ns();
 
         // Add a test instrument to the cache (required for crossed book resolution)
-        use nautilus_model::{identifiers::Symbol, instruments::CryptoPerpetual, types::Currency};
         let symbol = Symbol::from("BTC-USD-PERP");
         let instrument = CryptoPerpetual::new(
             instrument_id,
@@ -2469,21 +2475,21 @@ mod tests {
 
         let incomplete_bars = Arc::new(DashMap::new());
         let ctx = WsMessageContext {
-            data_sender: &sender,
-            instruments: &instruments,
-            order_books: &order_books,
-            last_quotes: &last_quotes,
-            ws_client: &ws_client,
-            active_orderbook_subs: &active_orderbook_subs,
-            active_trade_subs: &active_trade_subs,
-            active_bar_subs: &active_bar_subs,
-            incomplete_bars: &incomplete_bars,
+            data_sender: sender,
+            instruments,
+            order_books,
+            last_quotes,
+            ws_client,
+            active_orderbook_subs,
+            active_trade_subs,
+            active_bar_subs,
+            incomplete_bars,
         };
         DydxDataClient::handle_ws_message(message, &ctx);
 
         // Ensure order book was created and top-of-book quote cached.
-        assert!(order_books.get(&instrument_id).is_some());
-        assert!(last_quotes.get(&instrument_id).is_some());
+        assert!(ctx.order_books.get(&instrument_id).is_some());
+        assert!(ctx.last_quotes.get(&instrument_id).is_some());
 
         // Ensure a quote and deltas Data events were emitted.
         let mut saw_quote = false;
@@ -2511,22 +2517,22 @@ mod tests {
         let instruments = Arc::new(DashMap::new());
         let order_books = Arc::new(DashMap::new());
         let last_quotes = Arc::new(DashMap::new());
-        let ws_client: Option<DydxWebSocketClient> = None;
+        let ws_client = DydxWebSocketClient::new_public("ws://test".to_string(), None);
         let active_orderbook_subs = Arc::new(DashMap::new());
         let active_trade_subs = Arc::new(DashMap::new());
         let active_bar_subs = Arc::new(DashMap::new());
         let incomplete_bars = Arc::new(DashMap::new());
 
         let ctx = WsMessageContext {
-            data_sender: &sender,
-            instruments: &instruments,
-            order_books: &order_books,
-            last_quotes: &last_quotes,
-            ws_client: &ws_client,
-            active_orderbook_subs: &active_orderbook_subs,
-            active_trade_subs: &active_trade_subs,
-            active_bar_subs: &active_bar_subs,
-            incomplete_bars: &incomplete_bars,
+            data_sender: sender,
+            instruments,
+            order_books,
+            last_quotes,
+            ws_client,
+            active_orderbook_subs,
+            active_trade_subs,
+            active_bar_subs,
+            incomplete_bars,
         };
 
         let err = crate::websocket::error::DydxWebSocketError::from_message(
@@ -2547,7 +2553,8 @@ mod tests {
         let config = DydxDataClientConfig::default();
         let http_client = DydxHttpClient::default();
 
-        let client = DydxDataClient::new(client_id, config, http_client, None).unwrap();
+        let client =
+            DydxDataClient::new(client_id, config, http_client, create_test_ws_client()).unwrap();
 
         let instrument_id = InstrumentId::from("BTC-USD-PERP.DYDX");
         let spec = BarSpecification {
@@ -2621,7 +2628,8 @@ mod tests {
         )
         .unwrap();
 
-        let client = DydxDataClient::new(client_id, config, http_client, None).unwrap();
+        let client =
+            DydxDataClient::new(client_id, config, http_client, create_test_ws_client()).unwrap();
 
         // Seed instrument cache so request_bars can resolve precision.
         let instrument = create_test_instrument_any();
@@ -2950,7 +2958,8 @@ mod tests {
         )
         .unwrap();
 
-        let client = DydxDataClient::new(client_id, config, http_client, None).unwrap();
+        let client =
+            DydxDataClient::new(client_id, config, http_client, create_test_ws_client()).unwrap();
 
         let instrument = create_test_instrument_any();
         let instrument_id = instrument.id();
@@ -3045,7 +3054,8 @@ mod tests {
         )
         .unwrap();
 
-        let mut client = DydxDataClient::new(client_id, config, http_client, None).unwrap();
+        let mut client =
+            DydxDataClient::new(client_id, config, http_client, create_test_ws_client()).unwrap();
 
         // Seed instruments and orderbook state for a single instrument.
         let instrument = create_test_instrument_any();
@@ -3500,7 +3510,8 @@ mod tests {
         let client_id = ClientId::from("DYDX-TEST");
         let config = DydxDataClientConfig::default();
         let http_client = DydxHttpClient::default();
-        let client = DydxDataClient::new(client_id, config, http_client, None).unwrap();
+        let client =
+            DydxDataClient::new(client_id, config, http_client, create_test_ws_client()).unwrap();
 
         let request = RequestInstruments::new(
             None,
@@ -3560,7 +3571,8 @@ mod tests {
         )
         .unwrap();
 
-        let client = DydxDataClient::new(client_id, config, http_client, None).unwrap();
+        let client =
+            DydxDataClient::new(client_id, config, http_client, create_test_ws_client()).unwrap();
 
         let request = RequestInstruments::new(
             None,
@@ -3596,7 +3608,8 @@ mod tests {
         let client_id = ClientId::from("DYDX-CACHE-TEST");
         let config = DydxDataClientConfig::default();
         let http_client = DydxHttpClient::default();
-        let client = DydxDataClient::new(client_id, config, http_client, None).unwrap();
+        let client =
+            DydxDataClient::new(client_id, config, http_client, create_test_ws_client()).unwrap();
 
         let initial_cache_size = client.instruments.len();
 
@@ -3630,7 +3643,8 @@ mod tests {
         let client_id = ClientId::from("DYDX-CORR-TEST");
         let config = DydxDataClientConfig::default();
         let http_client = DydxHttpClient::default();
-        let client = DydxDataClient::new(client_id, config, http_client, None).unwrap();
+        let client =
+            DydxDataClient::new(client_id, config, http_client, create_test_ws_client()).unwrap();
 
         let request_id = UUID4::new();
         let request = RequestInstruments::new(
@@ -3655,7 +3669,8 @@ mod tests {
         let client_id = ClientId::from("DYDX-VENUE-TEST");
         let config = DydxDataClientConfig::default();
         let http_client = DydxHttpClient::default();
-        let client = DydxDataClient::new(client_id, config, http_client, None).unwrap();
+        let client =
+            DydxDataClient::new(client_id, config, http_client, create_test_ws_client()).unwrap();
 
         assert_eq!(client.venue(), *DYDX_VENUE);
 
@@ -3681,7 +3696,8 @@ mod tests {
         let client_id = ClientId::from("DYDX-TS-TEST");
         let config = DydxDataClientConfig::default();
         let http_client = DydxHttpClient::default();
-        let client = DydxDataClient::new(client_id, config, http_client, None).unwrap();
+        let client =
+            DydxDataClient::new(client_id, config, http_client, create_test_ws_client()).unwrap();
 
         let now = Utc::now();
         let start = Some(now - chrono::Duration::hours(24));
@@ -3721,7 +3737,8 @@ mod tests {
         let client_id = ClientId::from("DYDX-TS-START-ONLY");
         let config = DydxDataClientConfig::default();
         let http_client = DydxHttpClient::default();
-        let client = DydxDataClient::new(client_id, config, http_client, None).unwrap();
+        let client =
+            DydxDataClient::new(client_id, config, http_client, create_test_ws_client()).unwrap();
 
         let now = Utc::now();
         let start = Some(now - chrono::Duration::hours(24));
@@ -3757,7 +3774,8 @@ mod tests {
         let client_id = ClientId::from("DYDX-TS-END-ONLY");
         let config = DydxDataClientConfig::default();
         let http_client = DydxHttpClient::default();
-        let client = DydxDataClient::new(client_id, config, http_client, None).unwrap();
+        let client =
+            DydxDataClient::new(client_id, config, http_client, create_test_ws_client()).unwrap();
 
         let now = Utc::now();
         let end = Some(now);
@@ -3792,7 +3810,8 @@ mod tests {
         let client_id = ClientId::from("DYDX-FALLBACK-TEST");
         let config = DydxDataClientConfig::default();
         let http_client = DydxHttpClient::default();
-        let client = DydxDataClient::new(client_id, config, http_client, None).unwrap();
+        let client =
+            DydxDataClient::new(client_id, config, http_client, create_test_ws_client()).unwrap();
 
         let request = RequestInstruments::new(
             None,
@@ -3817,7 +3836,8 @@ mod tests {
         let client_id = ClientId::from("DYDX-PARAMS-TEST");
         let config = DydxDataClientConfig::default();
         let http_client = DydxHttpClient::default();
-        let client = DydxDataClient::new(client_id, config, http_client, None).unwrap();
+        let client =
+            DydxDataClient::new(client_id, config, http_client, create_test_ws_client()).unwrap();
 
         // Create params - just verify they're passed through
         let mut params_map = IndexMap::new();
@@ -3861,7 +3881,8 @@ mod tests {
         let client_id = ClientId::from("DYDX-START-END-RANGE");
         let config = DydxDataClientConfig::default();
         let http_client = DydxHttpClient::default();
-        let client = DydxDataClient::new(client_id, config, http_client, None).unwrap();
+        let client =
+            DydxDataClient::new(client_id, config, http_client, create_test_ws_client()).unwrap();
 
         let now = Utc::now();
         let start = Some(now - chrono::Duration::hours(48));
@@ -3916,7 +3937,9 @@ mod tests {
         let client_id_1 = ClientId::from("DYDX-CLIENT-1");
         let config1 = DydxDataClientConfig::default();
         let http_client1 = DydxHttpClient::default();
-        let client1 = DydxDataClient::new(client_id_1, config1, http_client1, None).unwrap();
+        let client1 =
+            DydxDataClient::new(client_id_1, config1, http_client1, create_test_ws_client())
+                .unwrap();
 
         let request1 = RequestInstruments::new(
             None,
@@ -3943,7 +3966,9 @@ mod tests {
         let client_id_2 = ClientId::from("DYDX-CLIENT-2");
         let config2 = DydxDataClientConfig::default();
         let http_client2 = DydxHttpClient::default();
-        let client2 = DydxDataClient::new(client_id_2, config2, http_client2, None).unwrap();
+        let client2 =
+            DydxDataClient::new(client_id_2, config2, http_client2, create_test_ws_client())
+                .unwrap();
 
         let request2 = RequestInstruments::new(
             None,
@@ -3980,7 +4005,8 @@ mod tests {
         let client_id = ClientId::from("DYDX-NO-TIMESTAMPS");
         let config = DydxDataClientConfig::default();
         let http_client = DydxHttpClient::default();
-        let client = DydxDataClient::new(client_id, config, http_client, None).unwrap();
+        let client =
+            DydxDataClient::new(client_id, config, http_client, create_test_ws_client()).unwrap();
 
         let request = RequestInstruments::new(
             None, // No start filter
@@ -4021,7 +4047,8 @@ mod tests {
         let client_id = ClientId::from("DYDX-CACHE-HIT");
         let config = DydxDataClientConfig::default();
         let http_client = DydxHttpClient::default();
-        let client = DydxDataClient::new(client_id, config, http_client, None).unwrap();
+        let client =
+            DydxDataClient::new(client_id, config, http_client, create_test_ws_client()).unwrap();
 
         // Pre-populate cache with test instrument
         let instrument = create_test_instrument_any();
@@ -4061,7 +4088,8 @@ mod tests {
         let client_id = ClientId::from("DYDX-CACHE-MISS");
         let config = DydxDataClientConfig::default();
         let http_client = DydxHttpClient::default();
-        let client = DydxDataClient::new(client_id, config, http_client, None).unwrap();
+        let client =
+            DydxDataClient::new(client_id, config, http_client, create_test_ws_client()).unwrap();
 
         let instrument_id = InstrumentId::from("BTC-USD-PERP.DYDX");
 
@@ -4115,7 +4143,8 @@ mod tests {
         )
         .unwrap();
 
-        let client = DydxDataClient::new(client_id, config, http_client, None).unwrap();
+        let client =
+            DydxDataClient::new(client_id, config, http_client, create_test_ws_client()).unwrap();
 
         let instrument_id = InstrumentId::from("INVALID-SYMBOL.DYDX");
 
@@ -4144,7 +4173,8 @@ mod tests {
         let client_id = ClientId::from("DYDX-BULK-CACHE");
         let config = DydxDataClientConfig::default();
         let http_client = DydxHttpClient::default();
-        let client = DydxDataClient::new(client_id, config, http_client, None).unwrap();
+        let client =
+            DydxDataClient::new(client_id, config, http_client, create_test_ws_client()).unwrap();
 
         let initial_cache_size = client.instruments.len();
 
@@ -4180,7 +4210,8 @@ mod tests {
         let client_id = ClientId::from("DYDX-CORR-ID");
         let config = DydxDataClientConfig::default();
         let http_client = DydxHttpClient::default();
-        let client = DydxDataClient::new(client_id, config, http_client, None).unwrap();
+        let client =
+            DydxDataClient::new(client_id, config, http_client, create_test_ws_client()).unwrap();
 
         // Pre-populate cache to get immediate response
         let instrument = create_test_instrument_any();
@@ -4219,7 +4250,8 @@ mod tests {
         let client_id = ClientId::from("DYDX-BOXED");
         let config = DydxDataClientConfig::default();
         let http_client = DydxHttpClient::default();
-        let client = DydxDataClient::new(client_id, config, http_client, None).unwrap();
+        let client =
+            DydxDataClient::new(client_id, config, http_client, create_test_ws_client()).unwrap();
 
         // Pre-populate cache
         let instrument = create_test_instrument_any();
@@ -4261,7 +4293,8 @@ mod tests {
         let client_id = ClientId::from("DYDX-SYMBOL");
         let config = DydxDataClientConfig::default();
         let http_client = DydxHttpClient::default();
-        let _client = DydxDataClient::new(client_id, config, http_client, None).unwrap();
+        let _client =
+            DydxDataClient::new(client_id, config, http_client, create_test_ws_client()).unwrap();
 
         // Test various instrument ID formats
         // Note: Symbol includes the -PERP suffix in dYdX
@@ -4287,7 +4320,8 @@ mod tests {
         let client_id = ClientId::from("DYDX-FALLBACK");
         let config = DydxDataClientConfig::default();
         let http_client = DydxHttpClient::default();
-        let client = DydxDataClient::new(client_id, config, http_client, None).unwrap();
+        let client =
+            DydxDataClient::new(client_id, config, http_client, create_test_ws_client()).unwrap();
 
         // Pre-populate cache
         let instrument = create_test_instrument_any();
@@ -4362,7 +4396,8 @@ mod tests {
         )
         .unwrap();
 
-        let client = DydxDataClient::new(client_id, config, http_client, None).unwrap();
+        let client =
+            DydxDataClient::new(client_id, config, http_client, create_test_ws_client()).unwrap();
 
         let instrument = create_test_instrument_any();
         let instrument_id = instrument.id();
@@ -4404,8 +4439,6 @@ mod tests {
             assert_eq!(tick.price, Price::new(100.25, price_precision));
             assert_eq!(tick.size, Quantity::new(1.5, size_precision));
             assert_eq!(tick.trade_id.to_string(), "trade-1");
-
-            use nautilus_model::enums::AggressorSide;
             assert_eq!(tick.aggressor_side, AggressorSide::Buyer);
         } else {
             panic!("did not receive trades response in time");
@@ -4451,7 +4484,8 @@ mod tests {
         )
         .unwrap();
 
-        let client = DydxDataClient::new(client_id, config, http_client, None).unwrap();
+        let client =
+            DydxDataClient::new(client_id, config, http_client, create_test_ws_client()).unwrap();
 
         let instrument = create_test_instrument_any();
         let instrument_id = instrument.id();
@@ -4553,7 +4587,8 @@ mod tests {
         )
         .unwrap();
 
-        let client = DydxDataClient::new(client_id, config, http_client, None).unwrap();
+        let client =
+            DydxDataClient::new(client_id, config, http_client, create_test_ws_client()).unwrap();
 
         let instrument = create_test_instrument_any();
         let instrument_id = instrument.id();
@@ -4629,7 +4664,8 @@ mod tests {
         )
         .unwrap();
 
-        let client = DydxDataClient::new(client_id, config, http_client, None).unwrap();
+        let client =
+            DydxDataClient::new(client_id, config, http_client, create_test_ws_client()).unwrap();
 
         let instrument = create_test_instrument_any();
         let instrument_id = instrument.id();
@@ -4704,7 +4740,8 @@ mod tests {
         )
         .unwrap();
 
-        let client = DydxDataClient::new(client_id, config, http_client, None).unwrap();
+        let client =
+            DydxDataClient::new(client_id, config, http_client, create_test_ws_client()).unwrap();
 
         let instrument = create_test_instrument_any();
         let instrument_id = instrument.id();
@@ -4751,7 +4788,8 @@ mod tests {
         let client_id = ClientId::from("DYDX-TRADES-NO-INST");
         let config = DydxDataClientConfig::default();
         let http_client = DydxHttpClient::default();
-        let client = DydxDataClient::new(client_id, config, http_client, None).unwrap();
+        let client =
+            DydxDataClient::new(client_id, config, http_client, create_test_ws_client()).unwrap();
 
         // Don't add instrument to cache
         let instrument_id = InstrumentId::from("UNKNOWN-SYMBOL.DYDX");
@@ -4811,7 +4849,8 @@ mod tests {
         )
         .unwrap();
 
-        let client = DydxDataClient::new(client_id, config, http_client, None).unwrap();
+        let client =
+            DydxDataClient::new(client_id, config, http_client, create_test_ws_client()).unwrap();
 
         let instrument = create_test_instrument_any();
         let instrument_id = instrument.id();
@@ -4853,7 +4892,8 @@ mod tests {
         let client_id = ClientId::from("DYDX-SYMBOL-CONV");
         let config = DydxDataClientConfig::default();
         let http_client = DydxHttpClient::default();
-        let _client = DydxDataClient::new(client_id, config, http_client, None).unwrap();
+        let _client =
+            DydxDataClient::new(client_id, config, http_client, create_test_ws_client()).unwrap();
 
         // Verify symbol format for various instruments
         let test_cases = vec![
@@ -4895,7 +4935,8 @@ mod tests {
         )
         .unwrap();
 
-        let client = DydxDataClient::new(client_id, config, http_client, None).unwrap();
+        let client =
+            DydxDataClient::new(client_id, config, http_client, create_test_ws_client()).unwrap();
 
         let request = RequestInstruments::new(
             None,
@@ -4940,7 +4981,8 @@ mod tests {
         )
         .unwrap();
 
-        let client = DydxDataClient::new(client_id, config, http_client, None).unwrap();
+        let client =
+            DydxDataClient::new(client_id, config, http_client, create_test_ws_client()).unwrap();
 
         let instrument = create_test_instrument_any();
         let instrument_id = instrument.id();
@@ -4991,7 +5033,8 @@ mod tests {
         )
         .unwrap();
 
-        let client = DydxDataClient::new(client_id, config, http_client, None).unwrap();
+        let client =
+            DydxDataClient::new(client_id, config, http_client, create_test_ws_client()).unwrap();
 
         let request = RequestInstruments::new(
             None,
@@ -5036,7 +5079,8 @@ mod tests {
         )
         .unwrap();
 
-        let client = DydxDataClient::new(client_id, config, http_client, None).unwrap();
+        let client =
+            DydxDataClient::new(client_id, config, http_client, create_test_ws_client()).unwrap();
 
         let instrument = create_test_instrument_any();
         let instrument_id = instrument.id();
@@ -5096,7 +5140,8 @@ mod tests {
         )
         .unwrap();
 
-        let client = DydxDataClient::new(client_id, config, http_client, None).unwrap();
+        let client =
+            DydxDataClient::new(client_id, config, http_client, create_test_ws_client()).unwrap();
 
         let request = RequestInstruments::new(
             None,
@@ -5144,7 +5189,8 @@ mod tests {
         )
         .unwrap();
 
-        let client = DydxDataClient::new(client_id, config, http_client, None).unwrap();
+        let client =
+            DydxDataClient::new(client_id, config, http_client, create_test_ws_client()).unwrap();
 
         let request = RequestInstruments::new(
             None,
@@ -5189,7 +5235,8 @@ mod tests {
         )
         .unwrap();
 
-        let client = DydxDataClient::new(client_id, config, http_client, None).unwrap();
+        let client =
+            DydxDataClient::new(client_id, config, http_client, create_test_ws_client()).unwrap();
 
         let instrument = create_test_instrument_any();
         let instrument_id = instrument.id();
@@ -5242,7 +5289,8 @@ mod tests {
         )
         .unwrap();
 
-        let client = DydxDataClient::new(client_id, config, http_client, None).unwrap();
+        let client =
+            DydxDataClient::new(client_id, config, http_client, create_test_ws_client()).unwrap();
 
         // All these should return Ok() without panicking
         let request_instruments = RequestInstruments::new(
@@ -5327,7 +5375,8 @@ mod tests {
         )
         .unwrap();
 
-        let client = DydxDataClient::new(client_id, config, http_client, None).unwrap();
+        let client =
+            DydxDataClient::new(client_id, config, http_client, create_test_ws_client()).unwrap();
 
         let request = RequestInstruments::new(
             None,
@@ -5410,7 +5459,8 @@ mod tests {
         )
         .unwrap();
 
-        let client = DydxDataClient::new(client_id, config, http_client, None).unwrap();
+        let client =
+            DydxDataClient::new(client_id, config, http_client, create_test_ws_client()).unwrap();
 
         let request = RequestInstruments::new(
             None,
@@ -5495,7 +5545,8 @@ mod tests {
         )
         .unwrap();
 
-        let client = DydxDataClient::new(client_id, config, http_client, None).unwrap();
+        let client =
+            DydxDataClient::new(client_id, config, http_client, create_test_ws_client()).unwrap();
 
         let request = RequestInstruments::new(
             None,
@@ -5575,7 +5626,8 @@ mod tests {
         )
         .unwrap();
 
-        let client = DydxDataClient::new(client_id, config, http_client, None).unwrap();
+        let client =
+            DydxDataClient::new(client_id, config, http_client, create_test_ws_client()).unwrap();
 
         let request = RequestInstruments::new(
             None,
@@ -5650,7 +5702,8 @@ mod tests {
         )
         .unwrap();
 
-        let client = DydxDataClient::new(client_id, config, http_client, None).unwrap();
+        let client =
+            DydxDataClient::new(client_id, config, http_client, create_test_ws_client()).unwrap();
 
         let request = RequestInstruments::new(
             None,
@@ -5733,7 +5786,8 @@ mod tests {
         )
         .unwrap();
 
-        let client = DydxDataClient::new(client_id, config, http_client, None).unwrap();
+        let client =
+            DydxDataClient::new(client_id, config, http_client, create_test_ws_client()).unwrap();
 
         let request = RequestInstruments::new(
             None,
@@ -5775,7 +5829,8 @@ mod tests {
         )
         .unwrap();
 
-        let client = DydxDataClient::new(client_id, config, http_client, None).unwrap();
+        let client =
+            DydxDataClient::new(client_id, config, http_client, create_test_ws_client()).unwrap();
 
         // Valid format but non-existent instrument
         let non_existent_id = InstrumentId::from("NONEXISTENT-USD.DYDX");
@@ -5826,7 +5881,8 @@ mod tests {
         )
         .unwrap();
 
-        let client = DydxDataClient::new(client_id, config, http_client, None).unwrap();
+        let client =
+            DydxDataClient::new(client_id, config, http_client, create_test_ws_client()).unwrap();
 
         let instrument = create_test_instrument_any();
         let instrument_id = instrument.id();
@@ -5879,7 +5935,8 @@ mod tests {
         )
         .unwrap();
 
-        let client = DydxDataClient::new(client_id, config, http_client, None).unwrap();
+        let client =
+            DydxDataClient::new(client_id, config, http_client, create_test_ws_client()).unwrap();
 
         let instrument = create_test_instrument_any();
         let instrument_id = instrument.id();
@@ -5921,7 +5978,8 @@ mod tests {
         )
         .unwrap();
 
-        let client = DydxDataClient::new(client_id, config, http_client, None).unwrap();
+        let client =
+            DydxDataClient::new(client_id, config, http_client, create_test_ws_client()).unwrap();
 
         let instrument = create_test_instrument_any();
         let instrument_id = instrument.id();
@@ -5968,7 +6026,8 @@ mod tests {
         )
         .unwrap();
 
-        let client = DydxDataClient::new(client_id, config, http_client, None).unwrap();
+        let client =
+            DydxDataClient::new(client_id, config, http_client, create_test_ws_client()).unwrap();
 
         let instrument = create_test_instrument_any();
         let instrument_id = instrument.id();
@@ -6016,7 +6075,8 @@ mod tests {
         )
         .unwrap();
 
-        let client = DydxDataClient::new(client_id, config, http_client, None).unwrap();
+        let client =
+            DydxDataClient::new(client_id, config, http_client, create_test_ws_client()).unwrap();
 
         let instrument = create_test_instrument_any();
         let instrument_id = instrument.id();
@@ -6063,7 +6123,8 @@ mod tests {
         )
         .unwrap();
 
-        let client = DydxDataClient::new(client_id, config, http_client, None).unwrap();
+        let client =
+            DydxDataClient::new(client_id, config, http_client, create_test_ws_client()).unwrap();
 
         let instrument = create_test_instrument_any();
         let instrument_id = instrument.id();
@@ -6201,7 +6262,8 @@ mod tests {
         )
         .unwrap();
 
-        let client = DydxDataClient::new(client_id, config, http_client, None).unwrap();
+        let client =
+            DydxDataClient::new(client_id, config, http_client, create_test_ws_client()).unwrap();
 
         let request = RequestInstruments::new(
             None,
@@ -6242,7 +6304,8 @@ mod tests {
         )
         .unwrap();
 
-        let client = DydxDataClient::new(client_id, config, http_client, None).unwrap();
+        let client =
+            DydxDataClient::new(client_id, config, http_client, create_test_ws_client()).unwrap();
 
         let request = RequestInstruments::new(
             None,
@@ -6286,7 +6349,8 @@ mod tests {
         )
         .unwrap();
 
-        let client = DydxDataClient::new(client_id, config, http_client, None).unwrap();
+        let client =
+            DydxDataClient::new(client_id, config, http_client, create_test_ws_client()).unwrap();
 
         let request_id = UUID4::new();
         let request = RequestInstruments::new(
@@ -6331,7 +6395,8 @@ mod tests {
         )
         .unwrap();
 
-        let client = DydxDataClient::new(client_id, config, http_client, None).unwrap();
+        let client =
+            DydxDataClient::new(client_id, config, http_client, create_test_ws_client()).unwrap();
 
         let request = RequestInstruments::new(
             None,
@@ -6375,7 +6440,8 @@ mod tests {
         )
         .unwrap();
 
-        let client = DydxDataClient::new(client_id, config, http_client, None).unwrap();
+        let client =
+            DydxDataClient::new(client_id, config, http_client, create_test_ws_client()).unwrap();
 
         let start = Some(Utc::now() - chrono::Duration::days(1));
         let end = Some(Utc::now());
@@ -6428,7 +6494,8 @@ mod tests {
         )
         .unwrap();
 
-        let client = DydxDataClient::new(client_id, config, http_client, None).unwrap();
+        let client =
+            DydxDataClient::new(client_id, config, http_client, create_test_ws_client()).unwrap();
 
         // Since we can't easily create IndexMap in tests without importing,
         // just verify the params field exists by passing None
@@ -6471,7 +6538,8 @@ mod tests {
         )
         .unwrap();
 
-        let client = DydxDataClient::new(client_id, config, http_client, None).unwrap();
+        let client =
+            DydxDataClient::new(client_id, config, http_client, create_test_ws_client()).unwrap();
 
         let request = RequestInstruments::new(
             None,
@@ -6515,7 +6583,8 @@ mod tests {
         )
         .unwrap();
 
-        let client = DydxDataClient::new(client_id, config, http_client, None).unwrap();
+        let client =
+            DydxDataClient::new(client_id, config, http_client, create_test_ws_client()).unwrap();
 
         let request_id = UUID4::new();
         let start = Some(Utc::now() - chrono::Duration::hours(1));
@@ -6575,7 +6644,8 @@ mod tests {
         )
         .unwrap();
 
-        let client = DydxDataClient::new(client_id, config, http_client, None).unwrap();
+        let client =
+            DydxDataClient::new(client_id, config, http_client, create_test_ws_client()).unwrap();
 
         let instrument = create_test_instrument_any();
         let instrument_id = instrument.id();
@@ -6622,7 +6692,8 @@ mod tests {
         )
         .unwrap();
 
-        let client = DydxDataClient::new(client_id, config, http_client, None).unwrap();
+        let client =
+            DydxDataClient::new(client_id, config, http_client, create_test_ws_client()).unwrap();
 
         let instrument = create_test_instrument_any();
         let instrument_id = instrument.id();
@@ -6669,7 +6740,8 @@ mod tests {
         )
         .unwrap();
 
-        let client = DydxDataClient::new(client_id, config, http_client, None).unwrap();
+        let client =
+            DydxDataClient::new(client_id, config, http_client, create_test_ws_client()).unwrap();
 
         let instrument = create_test_instrument_any();
         let instrument_id = instrument.id();
@@ -6718,7 +6790,8 @@ mod tests {
         )
         .unwrap();
 
-        let client = DydxDataClient::new(client_id, config, http_client, None).unwrap();
+        let client =
+            DydxDataClient::new(client_id, config, http_client, create_test_ws_client()).unwrap();
 
         let instrument = create_test_instrument_any();
         let instrument_id = instrument.id();
@@ -6781,7 +6854,8 @@ mod tests {
         )
         .unwrap();
 
-        let client = DydxDataClient::new(client_id, config, http_client, None).unwrap();
+        let client =
+            DydxDataClient::new(client_id, config, http_client, create_test_ws_client()).unwrap();
 
         let instrument = create_test_instrument_any();
         let instrument_id = instrument.id();
@@ -6842,7 +6916,8 @@ mod tests {
         )
         .unwrap();
 
-        let client = DydxDataClient::new(client_id, config, http_client, None).unwrap();
+        let client =
+            DydxDataClient::new(client_id, config, http_client, create_test_ws_client()).unwrap();
 
         let instrument = create_test_instrument_any();
         let instrument_id = instrument.id();
@@ -6946,7 +7021,8 @@ mod tests {
         )
         .unwrap();
 
-        let client = DydxDataClient::new(client_id, config, http_client, None).unwrap();
+        let client =
+            DydxDataClient::new(client_id, config, http_client, create_test_ws_client()).unwrap();
 
         let instrument = create_test_instrument_any();
         let instrument_id = instrument.id();
@@ -7027,7 +7103,8 @@ mod tests {
         )
         .unwrap();
 
-        let client = DydxDataClient::new(client_id, config, http_client, None).unwrap();
+        let client =
+            DydxDataClient::new(client_id, config, http_client, create_test_ws_client()).unwrap();
 
         let instrument = create_test_instrument_any();
         let instrument_id = instrument.id();
@@ -7133,7 +7210,8 @@ mod tests {
         )
         .unwrap();
 
-        let client = DydxDataClient::new(client_id, config, http_client, None).unwrap();
+        let client =
+            DydxDataClient::new(client_id, config, http_client, create_test_ws_client()).unwrap();
 
         let instrument = create_test_instrument_any();
         let instrument_id = instrument.id();
@@ -7227,7 +7305,8 @@ mod tests {
         )
         .unwrap();
 
-        let client = DydxDataClient::new(client_id, config, http_client, None).unwrap();
+        let client =
+            DydxDataClient::new(client_id, config, http_client, create_test_ws_client()).unwrap();
 
         let instrument = create_test_instrument_any();
         let instrument_id = instrument.id();
@@ -7334,7 +7413,8 @@ mod tests {
         )
         .unwrap();
 
-        let client = DydxDataClient::new(client_id, config, http_client, None).unwrap();
+        let client =
+            DydxDataClient::new(client_id, config, http_client, create_test_ws_client()).unwrap();
 
         let instrument = create_test_instrument_any();
         let instrument_id = instrument.id();
@@ -7398,8 +7478,13 @@ mod tests {
         )
         .unwrap();
 
-        let client =
-            DydxDataClient::new(ClientId::from("dydx_test"), config, http_client, None).unwrap();
+        let client = DydxDataClient::new(
+            ClientId::from("dydx_test"),
+            config,
+            http_client,
+            create_test_ws_client(),
+        )
+        .unwrap();
 
         let initial_capacity = client.order_books.capacity();
 
@@ -7479,8 +7564,13 @@ mod tests {
         )
         .unwrap();
 
-        let client =
-            DydxDataClient::new(ClientId::from("dydx_test"), config, http_client, None).unwrap();
+        let client = DydxDataClient::new(
+            ClientId::from("dydx_test"),
+            config,
+            http_client,
+            create_test_ws_client(),
+        )
+        .unwrap();
 
         let instrument = create_test_instrument_any();
         let instrument_id = instrument.id();
@@ -7535,8 +7625,13 @@ mod tests {
         )
         .unwrap();
 
-        let client =
-            DydxDataClient::new(ClientId::from("dydx_test"), config, http_client, None).unwrap();
+        let client = DydxDataClient::new(
+            ClientId::from("dydx_test"),
+            config,
+            http_client,
+            create_test_ws_client(),
+        )
+        .unwrap();
 
         let instrument = create_test_instrument_any();
         let instrument_id = instrument.id();
@@ -7587,8 +7682,13 @@ mod tests {
         )
         .unwrap();
 
-        let client =
-            DydxDataClient::new(ClientId::from("dydx_test"), config, http_client, None).unwrap();
+        let client = DydxDataClient::new(
+            ClientId::from("dydx_test"),
+            config,
+            http_client,
+            create_test_ws_client(),
+        )
+        .unwrap();
 
         let instrument = create_test_instrument_any();
         let instrument_id = instrument.id();

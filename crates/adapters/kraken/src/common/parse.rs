@@ -19,8 +19,8 @@ use std::str::FromStr;
 
 use anyhow::Context;
 use nautilus_core::{
-    datetime::NANOSECONDS_IN_MILLISECOND, nanos::UnixNanos,
-    parsing::min_increment_precision_from_str, uuid::UUID4,
+    datetime::NANOSECONDS_IN_MILLISECOND, nanos::UnixNanos, parsing::precision_from_str,
+    uuid::UUID4,
 };
 use nautilus_model::{
     data::{Bar, BarType, TradeTick},
@@ -250,7 +250,7 @@ pub fn parse_futures_instrument(
     // Derive precision from tick_size string representation to handle non-power-of-10
     // tick sizes correctly (e.g., 0.25, 2.5)
     let tick_size = instrument.tick_size;
-    let price_precision = min_increment_precision_from_str(&tick_size.to_string());
+    let price_precision = precision_from_str(&tick_size.to_string());
     if price_precision > FIXED_PRECISION {
         anyhow::bail!(
             "Cannot parse instrument '{}': tick_size {tick_size} requires precision {price_precision} \
@@ -952,13 +952,14 @@ pub fn parse_futures_position_status_report(
     };
 
     let quantity = Quantity::new(position.size, instrument.size_precision());
+    let size_decimal = Decimal::from_str(&position.size.to_string()).unwrap_or(dec!(0));
     let signed_decimal_qty = match position_side {
-        PositionSideSpecified::Long => Decimal::from_f64_retain(position.size).unwrap_or(dec!(0)),
-        PositionSideSpecified::Short => -Decimal::from_f64_retain(position.size).unwrap_or(dec!(0)),
+        PositionSideSpecified::Long => size_decimal,
+        PositionSideSpecified::Short => -size_decimal,
         PositionSideSpecified::Flat => dec!(0),
     };
 
-    let avg_px_open = Some(Decimal::from_f64_retain(position.price).unwrap_or(dec!(0)));
+    let avg_px_open = Decimal::from_str(&position.price.to_string()).ok();
 
     Ok(PositionStatusReport {
         account_id,

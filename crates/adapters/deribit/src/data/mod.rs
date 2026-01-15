@@ -25,6 +25,7 @@ use anyhow::Context;
 use async_trait::async_trait;
 use futures_util::StreamExt;
 use nautilus_common::{
+    clients::DataClient,
     live::{runner::get_data_event_sender, runtime::get_runtime},
     log_info,
     messages::{
@@ -45,7 +46,6 @@ use nautilus_core::{
     datetime::datetime_to_unix_nanos,
     time::{AtomicTime, get_atomic_clock_realtime},
 };
-use nautilus_data::client::DataClient;
 use nautilus_model::{
     data::{Data, OrderBookDeltas_API},
     identifiers::{ClientId, InstrumentId, Venue},
@@ -65,7 +65,8 @@ use crate::{
         models::{DeribitCurrency, DeribitInstrumentKind},
     },
     websocket::{
-        client::DeribitWebSocketClient, enums::DeribitUpdateInterval, messages::NautilusWsMessage,
+        auth::DERIBIT_DATA_SESSION_NAME, client::DeribitWebSocketClient,
+        enums::DeribitUpdateInterval, messages::NautilusWsMessage,
     },
 };
 
@@ -169,7 +170,7 @@ impl DeribitDataClient {
                             }
                         }
                     }
-                    _ = cancellation.cancelled() => {
+                    () = cancellation.cancelled() => {
                         log::debug!("Deribit websocket stream task cancelled");
                         break;
                     }
@@ -236,6 +237,58 @@ impl DeribitDataClient {
                         log::error!("Failed to send funding rate: {e}");
                     }
                 }
+            }
+            NautilusWsMessage::OrderStatusReports(reports) => {
+                log::warn!(
+                    "Data client received OrderStatusReports message (should be handled by execution client): {} reports",
+                    reports.len()
+                );
+            }
+            NautilusWsMessage::FillReports(reports) => {
+                log::warn!(
+                    "Data client received FillReports message (should be handled by execution client): {} reports",
+                    reports.len()
+                );
+            }
+            NautilusWsMessage::OrderRejected(order) => {
+                log::warn!(
+                    "Data client received OrderRejected message (should be handled by execution client): {order:?}"
+                );
+            }
+            NautilusWsMessage::OrderAccepted(order) => {
+                log::warn!(
+                    "Data client received OrderAccepted message (should be handled by execution client): {order:?}"
+                );
+            }
+            NautilusWsMessage::OrderCanceled(order) => {
+                log::warn!(
+                    "Data client received OrderCanceled message (should be handled by execution client): {order:?}"
+                );
+            }
+            NautilusWsMessage::OrderExpired(order) => {
+                log::warn!(
+                    "Data client received OrderExpired message (should be handled by execution client): {order:?}"
+                );
+            }
+            NautilusWsMessage::OrderUpdated(order) => {
+                log::warn!(
+                    "Data client received OrderUpdated message (should be handled by execution client): {order:?}"
+                );
+            }
+            NautilusWsMessage::OrderCancelRejected(order) => {
+                log::warn!(
+                    "Data client received OrderCancelRejected message (should be handled by execution client): {order:?}"
+                );
+            }
+            NautilusWsMessage::OrderModifyRejected(order) => {
+                log::warn!(
+                    "Data client received OrderModifyRejected message (should be handled by execution client): {order:?}"
+                );
+            }
+            NautilusWsMessage::AccountState(state) => {
+                log::warn!(
+                    "Data client received AccountState message (should be handled by execution client): {state:?}"
+                );
             }
         }
     }
@@ -363,7 +416,7 @@ impl DataClient for DeribitDataClient {
 
         // Authenticate if credentials are configured (required for raw streams)
         if ws.has_credentials() {
-            ws.authenticate_session()
+            ws.authenticate_session(DERIBIT_DATA_SESSION_NAME)
                 .await
                 .context("failed to authenticate Deribit websocket")?;
             log_info!("Deribit WebSocket authenticated");

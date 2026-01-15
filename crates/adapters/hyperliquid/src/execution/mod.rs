@@ -20,6 +20,7 @@ use std::{str::FromStr, sync::Mutex};
 use anyhow::Context;
 use async_trait::async_trait;
 use nautilus_common::{
+    clients::ExecutionClient,
     live::{runner::get_exec_event_sender, runtime::get_runtime},
     messages::{
         ExecutionEvent, ExecutionReport as NautilusExecutionReport,
@@ -31,7 +32,7 @@ use nautilus_common::{
     },
 };
 use nautilus_core::{MUTEX_POISONED, UnixNanos, time::get_atomic_clock_realtime};
-use nautilus_execution::client::{ExecutionClient, base::ExecutionClientCore};
+use nautilus_live::ExecutionClientCore;
 use nautilus_model::{
     accounts::AccountAny,
     enums::{OmsType, OrderType},
@@ -424,14 +425,14 @@ impl ExecutionClient for HyperliquidExecutionClient {
     }
 
     fn submit_order(&self, command: &SubmitOrder) -> anyhow::Result<()> {
-        let order = &command.order;
+        let order = self.core.get_order(&command.client_order_id)?;
 
         if order.is_closed() {
             log::warn!("Cannot submit closed order {}", order.client_order_id());
             return Ok(());
         }
 
-        if let Err(e) = self.validate_order_submission(order) {
+        if let Err(e) = self.validate_order_submission(&order) {
             self.core.generate_order_rejected(
                 order.strategy_id(),
                 order.instrument_id(),
@@ -451,10 +452,9 @@ impl ExecutionClient for HyperliquidExecutionClient {
         );
 
         let http_client = self.http_client.clone();
-        let order_clone = order.clone();
 
         self.spawn_task("submit_order", async move {
-            match order_any_to_hyperliquid_request(&order_clone) {
+            match order_any_to_hyperliquid_request(&order) {
                 Ok(hyperliquid_order) => {
                     // Create exchange action for order placement with typed struct
                     let action = ExchangeAction::order(vec![hyperliquid_order]);
@@ -669,6 +669,7 @@ impl ExecutionClient for HyperliquidExecutionClient {
         let open_orders = cache.orders_open(
             Some(&self.core.venue),
             Some(&command.instrument_id),
+            None,
             None,
             Some(command.order_side),
         );
@@ -1077,7 +1078,7 @@ fn dispatch_execution_report(report: ExecutionReport) {
     let sender = get_exec_event_sender();
     match report {
         ExecutionReport::Order(order_report) => {
-            let exec_report = NautilusExecutionReport::OrderStatus(Box::new(order_report));
+            let exec_report = NautilusExecutionReport::Order(Box::new(order_report));
             if let Err(e) = sender.send(ExecutionEvent::Report(exec_report)) {
                 log::warn!("Failed to send order status report: {e}");
             }

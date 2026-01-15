@@ -41,7 +41,7 @@ use ustr::Ustr;
 use super::handler::{FeedHandler, HandlerCommand};
 use crate::{
     common::enums::{AxCandleWidth, AxMarketDataLevel},
-    websocket::messages::NautilusWsMessage,
+    websocket::messages::NautilusDataWsMessage,
 };
 
 /// Default heartbeat interval in seconds.
@@ -87,7 +87,7 @@ pub struct AxMdWebSocketClient {
     auth_token: Option<String>,
     connection_mode: Arc<ArcSwap<AtomicU8>>,
     cmd_tx: Arc<tokio::sync::RwLock<tokio::sync::mpsc::UnboundedSender<HandlerCommand>>>,
-    out_rx: Option<Arc<tokio::sync::mpsc::UnboundedReceiver<NautilusWsMessage>>>,
+    out_rx: Option<Arc<tokio::sync::mpsc::UnboundedReceiver<NautilusDataWsMessage>>>,
     signal: Arc<AtomicBool>,
     task_handle: Option<Arc<tokio::task::JoinHandle<()>>>,
     subscriptions: SubscriptionState,
@@ -138,6 +138,31 @@ impl AxMdWebSocketClient {
             url,
             heartbeat: heartbeat.or(Some(DEFAULT_HEARTBEAT_SECS)),
             auth_token: Some(auth_token),
+            connection_mode,
+            cmd_tx: Arc::new(tokio::sync::RwLock::new(cmd_tx)),
+            out_rx: None,
+            signal: Arc::new(AtomicBool::new(false)),
+            task_handle: None,
+            subscriptions: SubscriptionState::new(AX_TOPIC_DELIMITER),
+            instruments_cache: Arc::new(DashMap::new()),
+            request_id_counter: Arc::new(AtomicI64::new(1)),
+        }
+    }
+
+    /// Creates a new Ax market data WebSocket client without authentication.
+    ///
+    /// Use [`set_auth_token`](Self::set_auth_token) to set the token before connecting.
+    #[must_use]
+    pub fn without_auth(url: String, heartbeat: Option<u64>) -> Self {
+        let (cmd_tx, _cmd_rx) = tokio::sync::mpsc::unbounded_channel::<HandlerCommand>();
+
+        let initial_mode = AtomicU8::new(ConnectionMode::Closed.as_u8());
+        let connection_mode = Arc::new(ArcSwap::from_pointee(initial_mode));
+
+        Self {
+            url,
+            heartbeat: heartbeat.or(Some(DEFAULT_HEARTBEAT_SECS)),
+            auth_token: None,
             connection_mode,
             cmd_tx: Arc::new(tokio::sync::RwLock::new(cmd_tx)),
             out_rx: None,
@@ -216,6 +241,9 @@ impl AxMdWebSocketClient {
     ///
     /// Returns an error if the connection cannot be established.
     pub async fn connect(&mut self) -> AxWsResult<()> {
+        const MAX_RETRIES: u32 = 5;
+        const CONNECTION_TIMEOUT_SECS: u64 = 10;
+
         self.signal.store(false, Ordering::Relaxed);
 
         let (raw_handler, raw_rx) = channel_message_handler();
@@ -242,9 +270,6 @@ impl AxMdWebSocketClient {
         };
 
         // Retry initial connection with exponential backoff
-        const MAX_RETRIES: u32 = 5;
-        const CONNECTION_TIMEOUT_SECS: u64 = 10;
-
         let mut backoff = ExponentialBackoff::new(
             Duration::from_millis(500),
             Duration::from_millis(5000),
@@ -317,7 +342,7 @@ impl AxMdWebSocketClient {
 
         self.connection_mode.store(client.connection_mode_atomic());
 
-        let (out_tx, out_rx) = tokio::sync::mpsc::unbounded_channel::<NautilusWsMessage>();
+        let (out_tx, out_rx) = tokio::sync::mpsc::unbounded_channel::<NautilusDataWsMessage>();
         self.out_rx = Some(Arc::new(out_rx));
 
         let (cmd_tx, cmd_rx) = tokio::sync::mpsc::unbounded_channel::<HandlerCommand>();
@@ -348,7 +373,7 @@ impl AxMdWebSocketClient {
             );
 
             while let Some(msg) = handler.next().await {
-                if matches!(msg, NautilusWsMessage::Reconnected) {
+                if matches!(msg, NautilusDataWsMessage::Reconnected) {
                     log::info!("WebSocket reconnected, resubscribing...");
                     // TODO: Replay subscriptions on reconnect
                 }
@@ -453,7 +478,7 @@ impl AxMdWebSocketClient {
     /// # Panics
     ///
     /// Panics if called more than once or before connecting.
-    pub fn stream(&mut self) -> impl futures_util::Stream<Item = NautilusWsMessage> + use<'_> {
+    pub fn stream(&mut self) -> impl futures_util::Stream<Item = NautilusDataWsMessage> + 'static {
         let rx = self
             .out_rx
             .take()

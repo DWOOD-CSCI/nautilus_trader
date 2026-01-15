@@ -502,6 +502,7 @@ cdef class BacktestEngine:
         use_random_ids: bool = False,
         use_reduce_only: bool = True,
         use_message_queue: bool = True,
+        use_market_order_acks: bool = False,
         bar_execution: bool = True,
         bar_adaptive_high_low_ordering: bool = False,
         trade_execution: bool = False,
@@ -562,6 +563,8 @@ cdef class BacktestEngine:
             they have initially arrived. Setting this to False would be appropriate for real-time
             sandbox environments, where we don't want to introduce additional latency of waiting for
             the next data event before processing the trading command.
+        use_market_order_acks : bool, default False
+            If OrderAccepted events will be generated for market orders before filling.
         bar_execution : bool, default True
             If bars should be processed by the matching engine(s) (and move the market).
         bar_adaptive_high_low_ordering : bool, default False
@@ -616,9 +619,6 @@ cdef class BacktestEngine:
             else:
                 default_leverage = Decimal(1)
 
-        # Create exchange
-        normalized_price_protection = price_protection_points
-
         exchange = SimulatedExchange(
             venue=venue,
             oms_type=oms_type,
@@ -645,16 +645,16 @@ cdef class BacktestEngine:
             use_random_ids=use_random_ids,
             use_reduce_only=use_reduce_only,
             use_message_queue=use_message_queue,
+            use_market_order_acks=use_market_order_acks,
             bar_execution=bar_execution,
             bar_adaptive_high_low_ordering=bar_adaptive_high_low_ordering,
             trade_execution=trade_execution,
             liquidity_consumption=liquidity_consumption,
-            price_protection_points=normalized_price_protection,
+            price_protection_points=price_protection_points,
         )
 
         self._venues[venue] = exchange
 
-        # Create execution client for exchange
         exec_client = BacktestExecClient(
             exchange=exchange,
             msgbus=self._kernel.msgbus,
@@ -2532,6 +2532,8 @@ cdef class SimulatedExchange:
         they have initially arrived. Setting this to False would be appropriate for real-time
         sandbox environments, where we don't want to introduce additional latency of waiting for
         the next data event before processing the trading command.
+    use_market_order_acks : bool, default False
+        If OrderAccepted events will be generated for market orders before filling.
     bar_execution : bool, default True
         If bars should be processed by the matching engine(s) (and move the market).
     bar_adaptive_high_low_ordering : bool, default False
@@ -2595,6 +2597,7 @@ cdef class SimulatedExchange:
         bint use_random_ids = False,
         bint use_reduce_only = True,
         bint use_message_queue = True,
+        bint use_market_order_acks = False,
         bint bar_execution = True,
         bint bar_adaptive_high_low_ordering = False,
         bint trade_execution = False,
@@ -2638,6 +2641,7 @@ cdef class SimulatedExchange:
         self.use_random_ids = use_random_ids
         self.use_reduce_only = use_reduce_only
         self.use_message_queue = use_message_queue
+        self.use_market_order_acks = use_market_order_acks
         self.bar_execution = bar_execution
         self.bar_adaptive_high_low_ordering = bar_adaptive_high_low_ordering
         self.trade_execution = trade_execution
@@ -2798,6 +2802,7 @@ cdef class SimulatedExchange:
             use_position_ids=self.use_position_ids,
             use_random_ids=self.use_random_ids,
             use_reduce_only=self.use_reduce_only,
+            use_market_order_acks=self.use_market_order_acks,
             bar_execution=self.bar_execution,
             bar_adaptive_high_low_ordering=self.bar_adaptive_high_low_ordering,
             trade_execution=self.trade_execution,
@@ -3620,6 +3625,7 @@ cdef class OrderMatchingEngine:
         bint use_position_ids = True,
         bint use_random_ids = False,
         bint use_reduce_only = True,
+        bint use_market_order_acks = False,
         bint bar_execution = True,
         bint bar_adaptive_high_low_ordering = False,
         bint trade_execution = False,
@@ -3647,6 +3653,7 @@ cdef class OrderMatchingEngine:
         self._use_position_ids = use_position_ids
         self._use_random_ids = use_random_ids
         self._use_reduce_only = use_reduce_only
+        self._use_market_order_acks = use_market_order_acks
         self._bar_execution = bar_execution
         self._bar_adaptive_high_low_ordering = bar_adaptive_high_low_ordering
         self._trade_execution = trade_execution
@@ -4660,6 +4667,9 @@ cdef class OrderMatchingEngine:
             self._generate_order_rejected(order, f"no market for {order.instrument_id}")
             return  # Cannot accept order
 
+        if self._use_market_order_acks:
+            self._generate_order_accepted(order, venue_order_id=self._get_venue_order_id(order))
+
         # Immediately fill marketable order
         self.fill_market_order(order)
 
@@ -4671,6 +4681,9 @@ cdef class OrderMatchingEngine:
         elif order.side == OrderSide.SELL and not self._core.is_bid_initialized:
             self._generate_order_rejected(order, f"no market for {order.instrument_id}")
             return  # Cannot accept order
+
+        if self._use_market_order_acks:
+            self._generate_order_accepted(order, venue_order_id=self._get_venue_order_id(order))
 
         # Immediately fill marketable order
         self.fill_market_order(order)
@@ -5061,7 +5074,7 @@ cdef class OrderMatchingEngine:
                 # NOTE
                 # The activation price should have been set in OrderMatchingEngine._process_trailing_stop_order()
                 # However, the implementation of the emulator bypass this step, and directly call this method through match_order().
-                market_price = self.ask if order.side == OrderSide.BUY else self.bid
+                market_price = self._core.ask if order.side == OrderSide.BUY else self._core.bid
 
                 if market_price is None:
                     # If there is no market price, we cannot process the order
@@ -5270,6 +5283,7 @@ cdef class OrderMatchingEngine:
             return fills
 
         cdef dict[PriceRaw, tuple[QuantityRaw, QuantityRaw]] consumption
+
         if order_side == OrderSide.BUY:
             consumption = self._ask_consumption
         elif order_side == OrderSide.SELL:
@@ -5283,15 +5297,22 @@ cdef class OrderMatchingEngine:
         cdef:
             Price price
             Quantity qty
-            PriceRaw price_raw
-            double book_size_f64
-            QuantityRaw book_size_raw
+            Quantity level_size
             tuple level_state
+            PriceRaw price_raw
+            PriceRaw p_raw
+            QuantityRaw qty_raw
+            QuantityRaw q_raw
+            QuantityRaw level_size_raw
             QuantityRaw original_size
             QuantityRaw consumed
             QuantityRaw available
             QuantityRaw adjusted_qty_raw
+            QuantityRaw fill_total
             Quantity adjusted_qty
+
+        # Aggregated fill quantities per price (computed on-demand for missing levels)
+        cdef dict[PriceRaw, QuantityRaw] fill_totals = None
 
         for fill in fills:
             if max_qty_raw > 0 and remaining_qty == 0:
@@ -5301,24 +5322,61 @@ cdef class OrderMatchingEngine:
             qty = fill[1]
             price_raw = price._mem.raw
 
-            book_size_f64 = self._book.get_quantity_for_price(price, order_side)
-            book_size_raw = <QuantityRaw>(book_size_f64 * (10.0 ** FIXED_PRECISION))
+            level_size = self._book.get_quantity_at_level(price, order_side, self._size_prec)
+            level_size_raw = level_size._mem.raw
 
             level_state = consumption.get(price_raw)
+
+            # Handle race condition where level no longer exists in book (returns 0)
+            if level_size_raw == 0:
+                # Level was deleted/modified between fill determination and consumption.
+                # Use aggregated fill total for this price (handles L3 books with multiple
+                # fills at same price). If prior state exists, use max of prior original_size
+                # and fill total to ensure all fills can be processed.
+
+                if fill_totals is None:
+                    fill_totals = {}
+                    for f in fills:
+                        p_raw = (<Price>f[0])._mem.raw
+                        q_raw = (<Quantity>f[1])._mem.raw
+                        if p_raw in fill_totals:
+                            fill_totals[p_raw] += q_raw
+                        else:
+                            fill_totals[p_raw] = q_raw
+
+                fill_total = fill_totals.get(price_raw, qty._mem.raw)
+
+                if level_state is not None:
+                    level_size_raw = max(level_state[0], fill_total)
+                    self._log.debug(
+                        f"Liquidity consumption: level {price} not found in book, "
+                        f"using max of prior size {level_state[0]} and fill total {fill_total}",
+                    )
+                else:
+                    level_size_raw = fill_total
+                    self._log.debug(
+                        f"Liquidity consumption: level {price} not found in book, "
+                        f"using aggregated fill total {fill_total} as fallback",
+                    )
+
             if level_state is None:
-                original_size = book_size_raw
+                original_size = level_size_raw
                 consumed = 0
             else:
                 original_size = level_state[0]
                 consumed = level_state[1]
 
             # Reset consumption when book size changes (fresh data)
-            if original_size != book_size_raw:
-                original_size = book_size_raw
+            if original_size != level_size_raw:
+                original_size = level_size_raw
                 consumed = 0
 
             available = original_size - consumed if original_size > consumed else 0
             if available == 0:
+                self._log.debug(
+                    f"Liquidity consumed: skipping level {price} "
+                    f"(original_size={original_size}, consumed={consumed}, level_size_raw={level_size_raw})",
+                )
                 continue
 
             adjusted_qty_raw = min(qty._mem.raw, available)
@@ -5374,6 +5432,8 @@ cdef class OrderMatchingEngine:
             triggered_price = order.get_triggered_price_c()
             if triggered_price is not None:
                 fills[0] = (triggered_price, fills[0][1])
+                # Skip liquidity consumption for trigger price fills (may be at gap price with no book liquidity)
+                return fills
 
         return self._apply_liquidity_consumption(fills, order.side, order.leaves_qty._mem.raw)
 
@@ -5572,10 +5632,15 @@ cdef class OrderMatchingEngine:
                 fill_qty = self.determine_trade_fill_qty(order)
                 if fill_qty is not None:
                     self._log.debug(
-                        f"Trade execution fill: {fill_qty} @ {trade_price} "
-                        f"(trade_size: {self._last_trade_size}, book had {len(fills)} fills)",
+                        f"Trade execution fill: {fill_qty} @ {order.price} "
+                        f"(trade_price={trade_price}, trade_size={self._last_trade_size})",
                     )
-                    fills = [(trade_price, fill_qty)]
+
+                    # Fill at the limit price (conservative) rather than the trade price.
+                    # Trade execution fills already account for consumption via _trade_consumption,
+                    # return early to bypass _apply_liquidity_consumption which would incorrectly
+                    # discard these fills when the trade price isn't in the order book.
+                    return [(order.price, fill_qty)]
 
         if (
             fills

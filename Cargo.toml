@@ -88,10 +88,10 @@ nautilus-trading = { path = "crates/trading", version = "0.53.0" }
 # -----------------------------------------------------------------------------
 nautilus-architect-ax = { path = "crates/adapters/architect_ax", version = "0.53.0" }
 nautilus-binance = { path = "crates/adapters/binance", version = "0.53.0", default-features = false }
+nautilus-bitmex = { path = "crates/adapters/bitmex", version = "0.53.0", default-features = false }
 nautilus-blockchain = { path = "crates/adapters/blockchain", version = "0.53.0" }
 nautilus-bybit = { path = "crates/adapters/bybit", version = "0.53.0", default-features = false }
 nautilus-coinbase-intx = { path = "crates/adapters/coinbase_intx", version = "0.53.0", default-features = false }
-nautilus-bitmex = { path = "crates/adapters/bitmex", version = "0.53.0", default-features = false }
 nautilus-databento = { path = "crates/adapters/databento", version = "0.53.0", default-features = false }
 nautilus-deribit = { path = "crates/adapters/deribit", version = "0.53.0", default-features = false }
 nautilus-dydx = { path = "crates/adapters/dydx", version = "0.53.0", default-features = false }
@@ -102,58 +102,37 @@ nautilus-okx = { path = "crates/adapters/okx", version = "0.53.0", default-featu
 nautilus-tardis = { path = "crates/adapters/tardis", version = "0.53.0", default-features = false }
 
 # -----------------------------------------------------------------------------
-# Dependencies
+# Core dependencies
 # -----------------------------------------------------------------------------
 ahash = { version = "0.8.12", features = ["serde"] }
-alloy = { version = "1.2.1", default-features = false, features = [
-  "sol-types",
-  "contract",
-] }
 alloy-primitives = { version = "1.5.2", default-features = false, features = [
   "std",
   "serde",
 ] }
-alloy-signer = { version = "1.2.1", default-features = false }
-alloy-signer-local = { version = "1.2.1", default-features = false, features = [
-  "mnemonic",
-] }
-alloy-sol-types = "1.5.2"
 anyhow = "1.0.100"
-arc-swap = "1.8.0"
 arraydeque = "0.5.1"
-# Keep arrow major version in line with datafusion
-arrow = { version = "57.1.0", default-features = false, features = [
+arrow = { version = "57.2.0", default-features = false, features = [
   "csv",
   "json",
   "ipc",
 ] }
 async-stream = "0.3.6"
 async-trait = "0.1.89"
-aws-lc-rs = { version = "1.15.2", default-features = false, features = [
+aws-lc-rs = { version = "1.15.3", default-features = false, features = [
   "non-fips",
 ] }
 base64 = "0.22.1"
-binary-heap-plus = "0.5.0"
-bip32 = "0.5.3"
 bytes = { version = "1.11.0", features = ["serde"] }
-# Keep capnp in line with hypersync-client
-capnp = "0.23.2"
-chrono = { version = "0.4.42", default-features = false, features = [
+capnp = "0.25.0"
+chrono = { version = "0.4.43", default-features = false, features = [
   "serde",
   "std",
   "clock",
 ] }
 chrono-tz = "0.10.4"
 clap = { version = "4.5.54", features = ["derive", "env"] }
-compare = "0.1.0"
-cosmrs = { version = "0.22.0", default-features = false, features = ["bip32"] }
-csv = "1.4.0"
 dashmap = "6.1.0"
-databento = { version = "0.38.0", default-features = false, features = [
-  "historical",
-  "live",
-] }
-datafusion = { version = "51.0.0", default-features = false, features = [
+datafusion = { version = "52.0.0", default-features = false, features = [
   "parquet",
   "regex_expressions",
   "unicode_expressions",
@@ -163,12 +142,9 @@ derive_builder = { version = "0.20.2", default-features = false, features = [
   "alloc",
 ] }
 dotenvy = "0.15.7"
-dydx-proto = "0.4.0"
 ed25519-dalek = "2.2.0"
 enum_dispatch = "0.3.13"
 evalexpr = "=11.3.1" # Pinned to v11.3.1 for MIT licensing
-fallible-streaming-iterator = "0.1.9"
-flate2 = "1.1.5"
 futures = { version = "0.3.31", default-features = false, features = [
   "std",
   "async-await",
@@ -181,12 +157,9 @@ futures-util = { version = "0.3.31", default-features = false, features = [
 heck = "0.5.0"
 hex = "0.4.3"
 http = "1.4.0"
-hypersync-client = { version = "0.23.0" }
-hypersync-schema = { version = "0.4.0" }
 implied-vol = { version = "2.0.0" }
-indexmap = { version = "2.12.1", features = ["serde"] }
+indexmap = { version = "2.13.0", features = ["serde"] }
 itertools = "0.14.0"
-itoa = "1.0.17"
 log = { version = "0.4.29", features = [
   "std",
   "kv_unstable",
@@ -194,19 +167,14 @@ log = { version = "0.4.29", features = [
   "release_max_level_debug",
 ] }
 memchr = "2.7.6"
-# Keep object_store major version in line with datafusion
 object_store = { version = "0.12.4", default-features = false, features = [
   "fs",
 ] }
-# Keep parquet major version in line with datafusion
-parquet = { version = "57.1.0", default-features = false, features = [
+parquet = { version = "57.2.0", default-features = false, features = [
   "arrow",
   "async",
 ] }
 pem = "3.0.6"
-# Keep prost in sync with dydx-proto
-prost = { version = "0.13.5", default-features = false, features = ["std"] }
-prost-types = "0.13.5"
 pyo3 = { version = "0.27.2", default-features = false, features = [
   "chrono",
   "hashbrown",
@@ -247,27 +215,24 @@ reqwest = { version = "0.13.1", default-features = false, features = [
   "stream",
 ] }
 rmp-serde = "1.3.1"
-rust_decimal = "1.39.0"
-rust_decimal_macros = "1.39.0"
+rust_decimal = { version = "1.40.0", features = ["serde-with-float"] }
+rust_decimal_macros = "1.40.0"
 rustls = { version = "0.23.36", default-features = false, features = [
   "aws-lc-rs",
   "std",
 ] }
 rustls-pemfile = "2.2.0"
-ryu = "1.0.22"
 semver = "1.0.27"
 serde = { version = "1.0.228", default-features = false, features = [
   "derive",
   "std",
   "rc",
 ] }
-serde_json = { version = "1.0.148", default-features = false, features = [
+serde_json = { version = "1.0.149", default-features = false, features = [
   "std",
 ] }
-serde_repr = "0.1.20"
 serde_urlencoded = "0.7.1"
-serde_with = "3.16.1"
-simple_logger = "5.1.0"
+smallvec = "1.15.1"
 sqlx = { version = "0.8.6", default-features = false, features = [
   "postgres",
   "runtime-tokio",
@@ -284,12 +249,6 @@ tabled = { version = "0.20.0", default-features = false, features = [
   "derive",
 ] }
 thiserror = "2.0.17"
-time = { version = "0.3.44", default-features = false, features = [
-  "macros",
-  "parsing",
-  "serde",
-  "std",
-] }
 tokio = { version = "1.49.0", default-features = false, features = [
   "rt-multi-thread",
   "sync",
@@ -301,28 +260,63 @@ tokio = { version = "1.49.0", default-features = false, features = [
   "signal",
 ] }
 tokio-rustls = "0.26.4"
-tokio-stream = "0.1.18"
 tokio-tungstenite = { version = "0.28.0", features = [
   "rustls-tls-webpki-roots",
 ] }
 tokio-util = { version = "0.7.18", default-features = false, features = ["io"] }
-# Keep tonic in sync with dydx-proto
+toml = { version = "0.9.11", default-features = false, features = [
+  "parse",
+  "serde",
+] }
+unbounded-interval-tree = { version = "1.1.2", default-features = false }
+url = { version = "2.5.8", default-features = false }
+ustr = { version = "1.1.0", features = ["serde"] }
+uuid = { version = "1.19.0", features = ["v4", "serde"] }
+webpki-roots = "1.0.5"
+
+# -----------------------------------------------------------------------------
+# Adapter dependencies
+# -----------------------------------------------------------------------------
+alloy = { version = "1.4.3", default-features = false, features = [
+  "sol-types",
+  "contract",
+] }
+alloy-signer = { version = "1.4.3", default-features = false }
+alloy-signer-local = { version = "1.4.3", default-features = false, features = [
+  "mnemonic",
+] }
+alloy-sol-types = "1.5.2"
+arc-swap = "1.8.0"
+bip32 = "0.5.3"
+cosmrs = { version = "0.22.0", default-features = false, features = ["bip32"] }
+csv = "1.4.0"
+databento = { version = "0.38.0", default-features = false, features = [
+  "historical",
+  "live",
+] }
+dydx-proto = "0.4.0"
+fallible-streaming-iterator = "0.1.9"
+flate2 = "1.1.8"
+hypersync-client = { version = "0.23.0" }
+hypersync-schema = { version = "0.4.0" }
+itoa = "1.0.17"
+prost = { version = "0.13.5", default-features = false, features = ["std"] }
+ryu = "1.0.22"
+serde_repr = "0.1.20"
+serde_with = "3.16.1"
+time = { version = "0.3.45", default-features = false, features = [
+  "macros",
+  "parsing",
+  "serde",
+  "std",
+] }
 tonic = { version = "0.13.1", default-features = false, features = [
   "channel",
   "tls-aws-lc",
   "tls-webpki-roots",
 ] }
-toml = { version = "0.9.10", default-features = false, features = [
-  "parse",
-  "serde",
-] }
 totp-rs = { version = "5.7.0", features = ["gen_secret"] }
-unbounded-interval-tree = { version = "1.1.2", default-features = false }
-url = { version = "2.5.7", default-features = false }
 urlencoding = "2.1.3"
-ustr = { version = "1.1.0", features = ["serde"] }
-uuid = { version = "1.19.0", features = ["v4", "serde"] }
-webpki-roots = "1.0.5"
 zeroize = { version = "1.8.2", features = ["alloc", "zeroize_derive"] }
 
 # -----------------------------------------------------------------------------
@@ -338,7 +332,6 @@ axum = { version = "0.8.8", default-features = false, features = [
 criterion = { version = "0.8.1", default-features = false, features = [
   "cargo_bench_support",
 ] }
-http-body-util = "0.1.3"
 iai = "0.1.1"
 pretty_assertions = "1.4.1"
 proptest = { version = "1.9.0", default-features = false, features = ["std"] }
@@ -349,8 +342,7 @@ turmoil = "0.7.0"
 # -----------------------------------------------------------------------------
 # Build dependencies
 # -----------------------------------------------------------------------------
-# Keep capnpc in line with capnp
-capnpc = "0.23.3"
+capnpc = "0.25.0"
 cbindgen = "0.29.2"
 walkdir = "2.5.0"
 
@@ -359,12 +351,12 @@ walkdir = "2.5.0"
 # -----------------------------------------------------------------------------
 [workspace.metadata.tools]
 cargo-audit = "0.22.0"
-cargo-deny = "0.18.9"
+cargo-deny = "0.19.0"
 cargo-edit = "0.13.8"
-cargo-llvm-cov = "0.6.22"
+cargo-llvm-cov = "0.6.23"
 cargo-machete = "0.9.1"
-cargo-nextest = "0.9.117"
-cargo-vet = "0.10.1"
+cargo-nextest = "0.9.122"
+cargo-vet = "0.10.2"
 lychee = "0.22.0"
 
 # cargo-vet supply chain security configuration
@@ -520,6 +512,15 @@ flat_map_option = "warn"
 map_unwrap_or = "warn"
 implicit_clone = "warn"
 return_self_not_must_use = "warn"
+explicit_into_iter_loop = "warn"
+stable_sort_primitive = "warn"
+needless_for_each = "warn"
+manual_is_variant_and = "warn"
+equatable_if_let = "warn"
+manual_assert = "warn"
+items_after_statements = "warn"
+ignored_unit_patterns = "warn"
+if_not_else = "warn"
 
 # Security and robustness
 suspicious_doc_comments = "warn"
