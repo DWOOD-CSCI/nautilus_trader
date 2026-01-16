@@ -21,8 +21,6 @@ default = ["high-precision"]
 python = [
   "nautilus-common/python",
   "nautilus-core/python",
-  "nautilus-data/python",
-  "nautilus-execution/python",
   "nautilus-model/python",
   "nautilus-network/python",
   "pyo3",
@@ -32,8 +30,6 @@ extension-module = [
   "python",
   "nautilus-common/extension-module",
   "nautilus-core/extension-module",
-  "nautilus-data/extension-module",
-  "nautilus-execution/extension-module",
   "nautilus-model/extension-module",
   "nautilus-network/extension-module",
   "pyo3/extension-module",
