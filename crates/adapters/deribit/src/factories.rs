@@ -92,8 +92,6 @@ impl DataClientFactory for DeribitDataClientFactory {
     }
 }
 
-// ------------------------------------------------------------------------------------------------
-
 impl ClientConfig for DeribitExecClientConfig {
     fn as_any(&self) -> &dyn Any {
         self
@@ -124,7 +122,6 @@ impl ExecutionClientFactory for DeribitExecutionClientFactory {
         name: &str,
         config: &dyn ClientConfig,
         cache: Rc<RefCell<Cache>>,
-        clock: Rc<RefCell<dyn Clock>>,
     ) -> anyhow::Result<Box<dyn ExecutionClient>> {
         let deribit_config = config
             .as_any()
@@ -149,7 +146,6 @@ impl ExecutionClientFactory for DeribitExecutionClientFactory {
             deribit_config.account_id,
             account_type,
             None, // base_currency
-            clock,
             cache,
         );
 

@@ -30,6 +30,7 @@ from nautilus_trader.model.data import BarSpecification
 from nautilus_trader.model.data import BarType
 from nautilus_trader.model.data import BookOrder
 from nautilus_trader.model.data import OrderBookDelta
+from nautilus_trader.model.data import OrderBookDepth10
 from nautilus_trader.model.enums import AccountType
 from nautilus_trader.model.enums import AggregationSource
 from nautilus_trader.model.enums import AggressorSide
@@ -45,12 +46,14 @@ from nautilus_trader.model.enums import PriceType
 from nautilus_trader.model.enums import TimeInForce
 from nautilus_trader.model.enums import TriggerType
 from nautilus_trader.model.events import OrderAccepted
+from nautilus_trader.model.events import OrderCanceled
 from nautilus_trader.model.events import OrderFilled
 from nautilus_trader.model.events import OrderModifyRejected
 from nautilus_trader.model.identifiers import StrategyId
 from nautilus_trader.model.identifiers import VenueOrderId
 from nautilus_trader.model.objects import Price
 from nautilus_trader.model.objects import Quantity
+from nautilus_trader.model.orders import MarketIfTouchedOrder
 from nautilus_trader.model.orders import MarketOrder
 from nautilus_trader.model.orders import StopMarketOrder
 from nautilus_trader.test_kit.providers import TestInstrumentProvider
@@ -195,7 +198,7 @@ class TestOrderMatchingEngine:
         self.matching_engine.process_trade_tick(trade)
 
         # Assert - Buyer aggressor should set ask price
-        assert self.matching_engine.best_ask_price() == Price.from_str("1000.0")
+        assert self.matching_engine.best_ask_price() == Price.from_str("1000.000")
 
     def test_process_trade_seller_aggressor(self) -> None:
         # Arrange
@@ -209,7 +212,7 @@ class TestOrderMatchingEngine:
         self.matching_engine.process_trade_tick(trade)
 
         # Assert - Seller aggressor should set bid price
-        assert self.matching_engine.best_bid_price() == Price.from_str("1000.0")
+        assert self.matching_engine.best_bid_price() == Price.from_str("1000.000")
 
     def test_process_trade_tick_no_aggressor_above_ask(self) -> None:
         # Arrange - Set initial bid/ask spread
@@ -255,8 +258,8 @@ class TestOrderMatchingEngine:
         self.matching_engine.process_trade_tick(trade)
 
         # Assert - L1_MBP book update_trade_tick sets both bid/ask to trade price
-        assert self.matching_engine.best_bid_price() == Price.from_str("1000.0")
-        assert self.matching_engine.best_ask_price() == Price.from_str("1000.0")
+        assert self.matching_engine.best_bid_price() == Price.from_str("1000.000")
+        assert self.matching_engine.best_ask_price() == Price.from_str("1000.000")
 
     def test_process_trade_tick_no_aggressor_below_bid(self) -> None:
         # Arrange - Set initial bid/ask spread
@@ -347,8 +350,8 @@ class TestOrderMatchingEngine:
 
         # Assert - With trade_execution=False, only book update happens, no aggressor logic
         # L1_MBP book update_trade_tick sets both bid/ask to trade price
-        assert matching_engine.best_bid_price() == Price.from_str("1000.0")
-        assert matching_engine.best_ask_price() == Price.from_str("1000.0")
+        assert matching_engine.best_bid_price() == Price.from_str("1000.000")
+        assert matching_engine.best_ask_price() == Price.from_str("1000.000")
 
     def test_trade_execution_difference_buyer_aggressor(self) -> None:
         # This test demonstrates that trade_execution=True vs False produces the same result
@@ -931,7 +934,7 @@ class TestOrderMatchingEngine:
             "BUY LIMIT at 211.32 should fill on SELLER trade at 211.32 with L2_MBP"
         )
         assert filled_events[0].ts_event == trade_ts, (
-            f"Fill should occur at trade timestamp {trade_ts}, got {filled_events[0].ts_event}"
+            f"Fill should occur at trade timestamp {trade_ts}, was {filled_events[0].ts_event}"
         )
 
     def test_trade_execution_complete_fill_when_trade_exceeds_order(self) -> None:
@@ -997,7 +1000,7 @@ class TestOrderMatchingEngine:
         filled_events = [m for m in messages if isinstance(m, OrderFilled)]
         assert len(filled_events) == 1
         assert filled_events[0].last_qty == self.instrument.make_qty(50.0), (
-            f"Fill qty should be capped at order size 50, got {filled_events[0].last_qty}"
+            f"Fill qty should be capped at order size 50, was {filled_events[0].last_qty}"
         )
 
     def test_modify_partially_filled_order_quantity_below_filled_rejected(self) -> None:
@@ -1066,7 +1069,7 @@ class TestOrderMatchingEngine:
         # Assert - Should receive OrderModifyRejected
         rejected_events = [m for m in messages if isinstance(m, OrderModifyRejected)]
         assert len(rejected_events) == 1, (
-            f"Expected OrderModifyRejected, got {[type(m).__name__ for m in messages]}"
+            f"Expected OrderModifyRejected, was {[type(m).__name__ for m in messages]}"
         )
         assert "below filled quantity" in rejected_events[0].reason
 
@@ -1156,9 +1159,9 @@ class TestOrderMatchingEngine:
 
         # Assert
         filled_events = [m for m in messages if isinstance(m, OrderFilled)]
-        assert len(filled_events) == 1, f"Expected 1 fill, got {len(filled_events)}"
+        assert len(filled_events) == 1, f"Expected 1 fill, was {len(filled_events)}"
         assert filled_events[0].last_qty == self.instrument.make_qty(10.0), (
-            f"First fill should be 10, got {filled_events[0].last_qty}"
+            f"First fill should be 10, was {filled_events[0].last_qty}"
         )
         messages.clear()
 
@@ -1182,10 +1185,10 @@ class TestOrderMatchingEngine:
         # Assert - fills against current book liquidity (50)
         filled_events = [m for m in messages if isinstance(m, OrderFilled)]
         assert len(filled_events) == 1, (
-            f"Expected 1 fill event after second delta, got {len(filled_events)}"
+            f"Expected 1 fill event after second delta, was {len(filled_events)}"
         )
         assert filled_events[0].last_qty == self.instrument.make_qty(50.0), (
-            f"Second fill should be 50 (current book liquidity), got {filled_events[0].last_qty}"
+            f"Second fill should be 50 (current book liquidity), was {filled_events[0].last_qty}"
         )
 
     def test_new_liquidity_at_better_price_fills(self) -> None:
@@ -1260,7 +1263,7 @@ class TestOrderMatchingEngine:
 
         # Assert
         filled_events = [m for m in messages if isinstance(m, OrderFilled)]
-        assert len(filled_events) == 1, f"Expected 1 fill, got {len(filled_events)}"
+        assert len(filled_events) == 1, f"Expected 1 fill, was {len(filled_events)}"
         assert filled_events[0].last_qty == self.instrument.make_qty(10.0)
         messages.clear()
 
@@ -2554,16 +2557,17 @@ class TestOrderMatchingEngine:
             (OrderSide.SELL, OrderSide.BUY),
         ],
     )
-    def test_liquidity_consumption_reuses_prior_level_size_on_deletion(
+    def test_liquidity_consumption_clears_on_delete_and_readd(
         self,
         order_side: OrderSide,
         liquidity_side: OrderSide,
     ):
         """
-        Test that when a level is deleted but we have prior consumption state, we reuse
-        the prior original_size rather than falling back to qty.
+        Test that DELETE clears consumption tracking, so re-ADD provides fresh
+        liquidity.
 
-        This ensures partial fills don't incorrectly shrink the tracked level size.
+        When a level is deleted and then re-added, consumption should reset to allow
+        fills from the new liquidity.
 
         """
         matching_engine = OrderMatchingEngine(
@@ -2620,7 +2624,7 @@ class TestOrderMatchingEngine:
         )
         matching_engine.process_order_book_delta(liquidity_delta)
 
-        # First order: consume 30 units (establishes consumption state with level_size=100)
+        # First order: consume 30 units
         order1 = TestExecStubs.market_order(
             instrument=self.instrument,
             order_side=order_side,
@@ -2630,7 +2634,7 @@ class TestOrderMatchingEngine:
         matching_engine.process_order(order1, self.account_id)
         matching_engine.iterate(timestamp_ns=1)
 
-        # Delete the level from book (simulates race condition)
+        # Delete the level (clears consumption tracking for this price)
         delete_delta = OrderBookDelta(
             instrument_id=self.instrument.id,
             action=BookAction.DELETE,
@@ -2647,7 +2651,7 @@ class TestOrderMatchingEngine:
         )
         matching_engine.process_order_book_delta(delete_delta)
 
-        # Re-add the level (simulates book update arriving)
+        # Re-add the level with same size (fresh liquidity)
         liquidity_delta2 = OrderBookDelta(
             instrument_id=self.instrument.id,
             action=BookAction.ADD,
@@ -2664,8 +2668,7 @@ class TestOrderMatchingEngine:
         )
         matching_engine.process_order_book_delta(liquidity_delta2)
 
-        # Second order: orders 80, gets only 70 remaining (100 - 30 = 70)
-        # This proves consumption tracking persists across level deletion and re-add
+        # Second order: orders 80, gets full 80 (DELETE cleared consumption)
         order2 = TestExecStubs.market_order(
             instrument=self.instrument,
             order_side=order_side,
@@ -2677,8 +2680,8 @@ class TestOrderMatchingEngine:
 
         filled_events = [m for m in messages if isinstance(m, OrderFilled)]
         assert len(filled_events) == 2
-        assert filled_events[0].last_qty == Quantity.from_str("30.000")  # First order full fill
-        assert filled_events[1].last_qty == Quantity.from_str("70.000")  # Only 70 remaining
+        assert filled_events[0].last_qty == Quantity.from_str("30.000")  # First order fill
+        assert filled_events[1].last_qty == Quantity.from_str("80.000")  # Full fill after DELETE
 
     @pytest.mark.parametrize(
         ("order_side", "liquidity_side"),
@@ -3187,7 +3190,7 @@ class TestOrderMatchingEngine:
         # Assert
         filled_events = [m for m in messages if isinstance(m, OrderFilled)]
         assert len(filled_events) == 2, (
-            f"Expected 2 fills for {order_side.name} orders, got {len(filled_events)}"
+            f"Expected 2 fills for {order_side.name} orders, was {len(filled_events)}"
         )
         assert filled_events[0].last_qty == Quantity.from_str("30.000")
         assert filled_events[1].last_qty == Quantity.from_str("20.000")
@@ -3269,7 +3272,7 @@ class TestOrderMatchingEngine:
 
         # Assert: Orders fill in order, consuming 30 + 30 + 10 = 70
         filled_events = [m for m in messages if isinstance(m, OrderFilled)]
-        assert len(filled_events) == 3, f"Expected 3 fills, got {len(filled_events)}"
+        assert len(filled_events) == 3, f"Expected 3 fills, was {len(filled_events)}"
         assert filled_events[0].last_qty == Quantity.from_str("30.000")
         assert filled_events[1].last_qty == Quantity.from_str("30.000")
         assert filled_events[2].last_qty == Quantity.from_str("10.000")
@@ -3330,7 +3333,7 @@ class TestOrderMatchingEngine:
 
         # Assert: Only 2 orders fill (20 + 20 = 40), third order gets nothing
         filled_events = [m for m in messages if isinstance(m, OrderFilled)]
-        assert len(filled_events) == 2, f"Expected 2 fills, got {len(filled_events)}"
+        assert len(filled_events) == 2, f"Expected 2 fills, was {len(filled_events)}"
         assert filled_events[0].last_qty == Quantity.from_str("20.000")
         assert filled_events[1].last_qty == Quantity.from_str("20.000")
 
@@ -3387,7 +3390,7 @@ class TestOrderMatchingEngine:
 
         # Assert: Fill is limited to trade size (30) not order size (100)
         filled_events = [m for m in messages if isinstance(m, OrderFilled)]
-        assert len(filled_events) == 1, f"Expected 1 fill, got {len(filled_events)}"
+        assert len(filled_events) == 1, f"Expected 1 fill, was {len(filled_events)}"
         assert filled_events[0].last_qty == Quantity.from_str("30.000")
 
     def test_stop_market_fills_on_seller_trade_tick(self) -> None:
@@ -3450,7 +3453,7 @@ class TestOrderMatchingEngine:
 
         # Assert: stop-market fills directly (no OrderTriggered event)
         filled_events = [m for m in messages if isinstance(m, OrderFilled)]
-        assert len(filled_events) == 1, f"Stop should fill, got {len(filled_events)} fills"
+        assert len(filled_events) == 1, f"Stop should fill, was {len(filled_events)} fills"
 
 
 def _create_bar_execution_matching_engine() -> OrderMatchingEngine:
@@ -3682,9 +3685,9 @@ def test_modify_partially_filled_limit_order_crosses_new_book_level(
 
     # Verify partial fill occurred
     filled_events = [e for e in events if isinstance(e, OrderFilled)]
-    assert len(filled_events) == 1, f"Expected 1 partial fill, got {len(filled_events)}"
+    assert len(filled_events) == 1, f"Expected 1 partial fill, was {len(filled_events)}"
     assert filled_events[0].last_qty == Quantity.from_str("50.000"), (
-        f"Expected partial fill of 50, got {filled_events[0].last_qty}"
+        f"Expected partial fill of 50, was {filled_events[0].last_qty}"
     )
     events.clear()
 
@@ -3710,7 +3713,7 @@ def test_modify_partially_filled_limit_order_crosses_new_book_level(
         f"got events: {[type(e).__name__ for e in events]}"
     )
     assert filled_events[0].last_px == Price.from_str(second_level_price), (
-        f"Fill price should be {second_level_price}, got {filled_events[0].last_px}"
+        f"Fill price should be {second_level_price}, was {filled_events[0].last_px}"
     )
 
 
@@ -3905,5 +3908,2356 @@ class TestOrderMatchingEngineLiquidityConsumption:
         filled_events = [m for m in messages if isinstance(m, OrderFilled)]
 
         assert len(filled_events) == 1, (
-            f"Stop should fill despite gap, got: {[type(m).__name__ for m in messages]}"
+            f"Stop should fill despite gap, was: {[type(m).__name__ for m in messages]}"
+        )
+
+    def test_market_if_touched_fills_at_trigger_price(self) -> None:
+        """
+        Test MarketIfTouchedOrder fills at trigger price during bar processing.
+
+        Regression test: Previously, MIT orders were filling at bar extremes
+        instead of trigger price, causing positive slippage.
+
+        """
+        # Arrange: Create engine with bar_execution enabled
+        clock = TestClock()
+        trader_id = TestIdStubs.trader_id()
+        msgbus = MessageBus(trader_id=trader_id, clock=clock)
+        cache = TestComponentStubs.cache()
+        cache.add_instrument(self.instrument)
+
+        matching_engine = OrderMatchingEngine(
+            instrument=self.instrument,
+            raw_id=0,
+            fill_model=FillModel(),
+            fee_model=MakerTakerFeeModel(),
+            book_type=BookType.L1_MBP,
+            oms_type=OmsType.NETTING,
+            account_type=AccountType.MARGIN,
+            reject_stop_orders=False,
+            bar_execution=True,
+            msgbus=msgbus,
+            cache=cache,
+            clock=clock,
+        )
+
+        messages: list[Any] = []
+        msgbus.register("ExecEngine.process", messages.append)
+
+        # Place BUY MIT at 95.00 (below current market)
+        # MIT BUY triggers when price touches 95 from above
+        order = MarketIfTouchedOrder(
+            trader_id=trader_id,
+            strategy_id=TestIdStubs.strategy_id(),
+            instrument_id=self.instrument.id,
+            client_order_id=TestIdStubs.client_order_id(),
+            order_side=OrderSide.BUY,
+            quantity=self.instrument.make_qty(1.0),
+            trigger_price=Price.from_str("95.00"),
+            trigger_type=TriggerType.DEFAULT,
+            init_id=UUID4(),
+            ts_init=0,
+        )
+        matching_engine.process_order(order, self.account_id)
+        messages.clear()
+
+        # Act: Process bar with low at 90.00 (crosses trigger at 95.00)
+        # Bar moves from 100 -> high:105 -> low:90 -> close:92
+        # Low at 90.00 should trigger MIT at 95.00, NOT fill at 90.00
+        bar_spec = BarSpecification(
+            step=1,
+            aggregation=BarAggregation.MINUTE,
+            price_type=PriceType.LAST,
+        )
+        bar_type = BarType(
+            instrument_id=self.instrument.id,
+            bar_spec=bar_spec,
+            aggregation_source=AggregationSource.EXTERNAL,
+        )
+        trigger_bar = Bar(
+            bar_type=bar_type,
+            open=Price.from_str("100.00"),
+            high=Price.from_str("105.00"),
+            low=Price.from_str("90.00"),
+            close=Price.from_str("92.00"),
+            volume=Quantity.from_str("100.000"),
+            ts_event=0,
+            ts_init=0,
+        )
+        matching_engine.process_bar(trigger_bar)
+
+        # Assert: MIT fills at trigger price (95.00), NOT bar extreme (90.00)
+        filled_events = [m for m in messages if isinstance(m, OrderFilled)]
+
+        assert len(filled_events) == 1, (
+            f"MIT should fill at trigger price, was: {[type(m).__name__ for m in messages]}"
+        )
+        fill_event = filled_events[0]
+        assert fill_event.last_px == Price.from_str("95.00"), (
+            f"Expected fill at trigger price 95.00, was {fill_event.last_px}"
+        )
+
+    def test_market_if_touched_sell_fills_at_trigger_price(self) -> None:
+        """
+        Test SELL MarketIfTouchedOrder fills at trigger price (not bar extreme) during
+        bar processing.
+        """
+        # Arrange
+        clock = TestClock()
+        trader_id = TestIdStubs.trader_id()
+        msgbus = MessageBus(trader_id=trader_id, clock=clock)
+        cache = TestComponentStubs.cache()
+        cache.add_instrument(self.instrument)
+
+        matching_engine = OrderMatchingEngine(
+            instrument=self.instrument,
+            raw_id=0,
+            fill_model=FillModel(),
+            fee_model=MakerTakerFeeModel(),
+            book_type=BookType.L1_MBP,
+            oms_type=OmsType.NETTING,
+            account_type=AccountType.MARGIN,
+            reject_stop_orders=False,
+            bar_execution=True,
+            msgbus=msgbus,
+            cache=cache,
+            clock=clock,
+        )
+
+        messages: list[Any] = []
+        msgbus.register("ExecEngine.process", messages.append)
+
+        # SELL MIT at 105 triggers when price touches from below
+        order = MarketIfTouchedOrder(
+            trader_id=trader_id,
+            strategy_id=TestIdStubs.strategy_id(),
+            instrument_id=self.instrument.id,
+            client_order_id=TestIdStubs.client_order_id(),
+            order_side=OrderSide.SELL,
+            quantity=self.instrument.make_qty(1.0),
+            trigger_price=Price.from_str("105.00"),
+            trigger_type=TriggerType.DEFAULT,
+            init_id=UUID4(),
+            ts_init=0,
+        )
+        matching_engine.process_order(order, self.account_id)
+        messages.clear()
+
+        # Act: bar high at 110 crosses trigger at 105
+        bar_spec = BarSpecification(
+            step=1,
+            aggregation=BarAggregation.MINUTE,
+            price_type=PriceType.LAST,
+        )
+        bar_type = BarType(
+            instrument_id=self.instrument.id,
+            bar_spec=bar_spec,
+            aggregation_source=AggregationSource.EXTERNAL,
+        )
+        trigger_bar = Bar(
+            bar_type=bar_type,
+            open=Price.from_str("100.00"),
+            high=Price.from_str("110.00"),
+            low=Price.from_str("98.00"),
+            close=Price.from_str("102.00"),
+            volume=Quantity.from_str("100.000"),
+            ts_event=0,
+            ts_init=0,
+        )
+        matching_engine.process_bar(trigger_bar)
+
+        # Assert
+        filled_events = [m for m in messages if isinstance(m, OrderFilled)]
+        assert len(filled_events) == 1, (
+            f"MIT should fill at trigger price, was: {[type(m).__name__ for m in messages]}"
+        )
+        fill_event = filled_events[0]
+        assert fill_event.last_px == Price.from_str("105.00"), (
+            f"Expected fill at trigger price 105.00, was {fill_event.last_px}"
+        )
+
+    def test_market_if_touched_buy_fills_at_trigger_price_with_liquidity_consumption(
+        self,
+    ) -> None:
+        """
+        Test BUY MIT fills at trigger price with liquidity consumption enabled.
+
+        Regression: Liquidity consumption must not discard fills at trigger price
+        where no book liquidity exists (gap scenario).
+
+        """
+        # Arrange
+        clock = TestClock()
+        trader_id = TestIdStubs.trader_id()
+        msgbus = MessageBus(trader_id=trader_id, clock=clock)
+        cache = TestComponentStubs.cache()
+        cache.add_instrument(self.instrument)
+
+        matching_engine = OrderMatchingEngine(
+            instrument=self.instrument,
+            raw_id=0,
+            fill_model=FillModel(),
+            fee_model=MakerTakerFeeModel(),
+            book_type=BookType.L1_MBP,
+            oms_type=OmsType.NETTING,
+            account_type=AccountType.MARGIN,
+            reject_stop_orders=False,
+            bar_execution=True,
+            liquidity_consumption=True,
+            msgbus=msgbus,
+            cache=cache,
+            clock=clock,
+        )
+
+        messages: list[Any] = []
+        msgbus.register("ExecEngine.process", messages.append)
+
+        # BUY MIT at 95 triggers when price touches from above
+        order = MarketIfTouchedOrder(
+            trader_id=trader_id,
+            strategy_id=TestIdStubs.strategy_id(),
+            instrument_id=self.instrument.id,
+            client_order_id=TestIdStubs.client_order_id(),
+            order_side=OrderSide.BUY,
+            quantity=self.instrument.make_qty(1.0),
+            trigger_price=Price.from_str("95.00"),
+            trigger_type=TriggerType.DEFAULT,
+            init_id=UUID4(),
+            ts_init=0,
+        )
+        matching_engine.process_order(order, self.account_id)
+        messages.clear()
+
+        # Act: bar low at 90 crosses trigger at 95
+        bar_spec = BarSpecification(
+            step=1,
+            aggregation=BarAggregation.MINUTE,
+            price_type=PriceType.LAST,
+        )
+        bar_type = BarType(
+            instrument_id=self.instrument.id,
+            bar_spec=bar_spec,
+            aggregation_source=AggregationSource.EXTERNAL,
+        )
+        trigger_bar = Bar(
+            bar_type=bar_type,
+            open=Price.from_str("100.00"),
+            high=Price.from_str("102.00"),
+            low=Price.from_str("90.00"),
+            close=Price.from_str("98.00"),
+            volume=Quantity.from_str("100.000"),
+            ts_event=0,
+            ts_init=0,
+        )
+        matching_engine.process_bar(trigger_bar)
+
+        # Assert
+        filled_events = [m for m in messages if isinstance(m, OrderFilled)]
+        assert len(filled_events) == 1, (
+            f"MIT should fill with liquidity consumption, was: {[type(m).__name__ for m in messages]}"
+        )
+        fill_event = filled_events[0]
+        assert fill_event.last_px == Price.from_str("95.00"), (
+            f"Expected fill at trigger price 95.00 with liquidity consumption, was {fill_event.last_px}"
+        )
+
+    def test_market_if_touched_sell_fills_at_trigger_price_with_liquidity_consumption(
+        self,
+    ) -> None:
+        """
+        Test SELL MIT fills at trigger price with liquidity consumption enabled.
+
+        Regression: Liquidity consumption must not discard fills at trigger price
+        where no book liquidity exists (gap scenario).
+
+        """
+        # Arrange
+        clock = TestClock()
+        trader_id = TestIdStubs.trader_id()
+        msgbus = MessageBus(trader_id=trader_id, clock=clock)
+        cache = TestComponentStubs.cache()
+        cache.add_instrument(self.instrument)
+
+        matching_engine = OrderMatchingEngine(
+            instrument=self.instrument,
+            raw_id=0,
+            fill_model=FillModel(),
+            fee_model=MakerTakerFeeModel(),
+            book_type=BookType.L1_MBP,
+            oms_type=OmsType.NETTING,
+            account_type=AccountType.MARGIN,
+            reject_stop_orders=False,
+            bar_execution=True,
+            liquidity_consumption=True,
+            msgbus=msgbus,
+            cache=cache,
+            clock=clock,
+        )
+
+        messages: list[Any] = []
+        msgbus.register("ExecEngine.process", messages.append)
+
+        # SELL MIT at 105 triggers when price touches from below
+        order = MarketIfTouchedOrder(
+            trader_id=trader_id,
+            strategy_id=TestIdStubs.strategy_id(),
+            instrument_id=self.instrument.id,
+            client_order_id=TestIdStubs.client_order_id(),
+            order_side=OrderSide.SELL,
+            quantity=self.instrument.make_qty(1.0),
+            trigger_price=Price.from_str("105.00"),
+            trigger_type=TriggerType.DEFAULT,
+            init_id=UUID4(),
+            ts_init=0,
+        )
+        matching_engine.process_order(order, self.account_id)
+        messages.clear()
+
+        # Act: bar high at 110 crosses trigger at 105
+        bar_spec = BarSpecification(
+            step=1,
+            aggregation=BarAggregation.MINUTE,
+            price_type=PriceType.LAST,
+        )
+        bar_type = BarType(
+            instrument_id=self.instrument.id,
+            bar_spec=bar_spec,
+            aggregation_source=AggregationSource.EXTERNAL,
+        )
+        trigger_bar = Bar(
+            bar_type=bar_type,
+            open=Price.from_str("100.00"),
+            high=Price.from_str("110.00"),
+            low=Price.from_str("98.00"),
+            close=Price.from_str("102.00"),
+            volume=Quantity.from_str("100.000"),
+            ts_event=0,
+            ts_init=0,
+        )
+        matching_engine.process_bar(trigger_bar)
+
+        # Assert
+        filled_events = [m for m in messages if isinstance(m, OrderFilled)]
+        assert len(filled_events) == 1, (
+            f"MIT should fill with liquidity consumption, was: {[type(m).__name__ for m in messages]}"
+        )
+        fill_event = filled_events[0]
+        assert fill_event.last_px == Price.from_str("105.00"), (
+            f"Expected fill at trigger price 105.00 with liquidity consumption, was {fill_event.last_px}"
+        )
+
+    def test_liquidity_consumption_regression_level_after_delete(self):
+        """
+        Tests that a level reappearing after DELETE is treated as fresh liquidity and
+        matches correctly (no stale book race condition).
+        """
+        matching_engine = OrderMatchingEngine(
+            instrument=self.instrument,
+            raw_id=0,
+            fill_model=FillModel(),
+            fee_model=MakerTakerFeeModel(),
+            book_type=BookType.L2_MBP,
+            oms_type=OmsType.NETTING,
+            account_type=AccountType.MARGIN,
+            reject_stop_orders=True,
+            msgbus=self.msgbus,
+            cache=self.cache,
+            clock=self.clock,
+            liquidity_consumption=True,
+        )
+
+        messages: list[Any] = []
+        self.msgbus.register("ExecEngine.process", messages.append)
+
+        # Arrange
+        bid_delta = OrderBookDelta(
+            instrument_id=self.instrument.id,
+            action=BookAction.ADD,
+            order=BookOrder(
+                side=OrderSide.BUY,
+                price=Price.from_str("90.00"),
+                size=Quantity.from_str("1000.000"),
+                order_id=1,
+            ),
+            flags=0,
+            sequence=0,
+            ts_event=0,
+            ts_init=0,
+        )
+        matching_engine.process_order_book_delta(bid_delta)
+
+        ask_delta_1 = OrderBookDelta(
+            instrument_id=self.instrument.id,
+            action=BookAction.ADD,
+            order=BookOrder(
+                side=OrderSide.SELL,
+                price=Price.from_str("100.00"),
+                size=Quantity.from_str("500.000"),
+                order_id=100,
+            ),
+            flags=0,
+            sequence=1,
+            ts_event=0,
+            ts_init=0,
+        )
+        matching_engine.process_order_book_delta(ask_delta_1)
+
+        # Act - consume liquidity
+        order1 = TestExecStubs.market_order(
+            instrument=self.instrument,
+            order_side=OrderSide.BUY,
+            quantity=self.instrument.make_qty(500.0),
+            client_order_id=TestIdStubs.client_order_id(1),
+        )
+        matching_engine.process_order(order1, self.account_id)
+        matching_engine.iterate(timestamp_ns=1)
+
+        filled_events = [m for m in messages if isinstance(m, OrderFilled)]
+        assert len(filled_events) == 1
+        assert filled_events[0].last_qty == Quantity.from_str("500.000")
+        messages.clear()
+
+        # Act - delete level
+        ask_delta_2 = OrderBookDelta(
+            instrument_id=self.instrument.id,
+            action=BookAction.DELETE,
+            order=BookOrder(
+                side=OrderSide.SELL,
+                price=Price.from_str("100.00"),
+                size=Quantity.from_str("0.000"),
+                order_id=100,
+            ),
+            flags=0,
+            sequence=2,
+            ts_event=1,
+            ts_init=1,
+        )
+        matching_engine.process_order_book_delta(ask_delta_2)
+
+        # Act - level reappears after DELETE (tests stale book fix)
+        ask_delta_3 = OrderBookDelta(
+            instrument_id=self.instrument.id,
+            action=BookAction.UPDATE,
+            order=BookOrder(
+                side=OrderSide.SELL,
+                price=Price.from_str("100.00"),
+                size=Quantity.from_str("300.000"),
+                order_id=100,
+            ),
+            flags=0,
+            sequence=3,
+            ts_event=2,
+            ts_init=2,
+        )
+        matching_engine.process_order_book_delta(ask_delta_3)
+
+        # Assert - should fill 300 (fresh liquidity after DELETE)
+        order2 = TestExecStubs.market_order(
+            instrument=self.instrument,
+            order_side=OrderSide.BUY,
+            quantity=self.instrument.make_qty(300.0),
+            client_order_id=TestIdStubs.client_order_id(2),
+        )
+        matching_engine.process_order(order2, self.account_id)
+        matching_engine.iterate(timestamp_ns=3)
+
+        filled_events = [m for m in messages if isinstance(m, OrderFilled)]
+        assert len(filled_events) == 1
+        assert filled_events[0].last_qty == Quantity.from_str("300.000")
+
+    def test_liquidity_consumption_comprehensive_regression(self):
+        """
+        Tests key liquidity consumption scenarios:
+        1. Sequential fills with consumption tracking
+        2. UPDATE resets consumption (correct for L3/MBO)
+        3. Size increase resets consumption
+        4. Size decrease resets consumption
+        5. Level deletion and reappearance
+        """
+        matching_engine = OrderMatchingEngine(
+            instrument=self.instrument,
+            raw_id=0,
+            fill_model=FillModel(),
+            fee_model=MakerTakerFeeModel(),
+            book_type=BookType.L2_MBP,
+            oms_type=OmsType.NETTING,
+            account_type=AccountType.MARGIN,
+            reject_stop_orders=True,
+            msgbus=self.msgbus,
+            cache=self.cache,
+            clock=self.clock,
+            liquidity_consumption=True,
+        )
+
+        messages: list[Any] = []
+        self.msgbus.register("ExecEngine.process", messages.append)
+
+        bid_delta = OrderBookDelta(
+            instrument_id=self.instrument.id,
+            action=BookAction.ADD,
+            order=BookOrder(
+                side=OrderSide.BUY,
+                price=Price.from_str("90.00"),
+                size=Quantity.from_str("1000.000"),
+                order_id=1,
+            ),
+            flags=0,
+            sequence=0,
+            ts_event=0,
+            ts_init=0,
+        )
+        matching_engine.process_order_book_delta(bid_delta)
+
+        # Scenario 1: Initial ADD + consume
+        ask_delta_1 = OrderBookDelta(
+            instrument_id=self.instrument.id,
+            action=BookAction.ADD,
+            order=BookOrder(
+                side=OrderSide.SELL,
+                price=Price.from_str("100.00"),
+                size=Quantity.from_str("800.000"),
+                order_id=100,
+            ),
+            flags=0,
+            sequence=1,
+            ts_event=0,
+            ts_init=0,
+        )
+        matching_engine.process_order_book_delta(ask_delta_1)
+
+        order1 = TestExecStubs.market_order(
+            instrument=self.instrument,
+            order_side=OrderSide.BUY,
+            quantity=self.instrument.make_qty(500.0),
+            client_order_id=TestIdStubs.client_order_id(1),
+        )
+        matching_engine.process_order(order1, self.account_id)
+        matching_engine.iterate(timestamp_ns=1)
+
+        filled_events = [m for m in messages if isinstance(m, OrderFilled)]
+        assert len(filled_events) == 1
+        assert filled_events[0].last_qty == Quantity.from_str("500.000")
+        messages.clear()
+
+        # Scenario 2: UPDATE resets consumption (correct for L3 where same aggregate size
+        # could be backed by different orders)
+        ask_delta_2 = OrderBookDelta(
+            instrument_id=self.instrument.id,
+            action=BookAction.UPDATE,
+            order=BookOrder(
+                side=OrderSide.SELL,
+                price=Price.from_str("100.00"),
+                size=Quantity.from_str("800.000"),
+                order_id=100,
+            ),
+            flags=0,
+            sequence=2,
+            ts_event=1,
+            ts_init=1,
+        )
+        matching_engine.process_order_book_delta(ask_delta_2)
+
+        order2 = TestExecStubs.market_order(
+            instrument=self.instrument,
+            order_side=OrderSide.BUY,
+            quantity=self.instrument.make_qty(400.0),
+            client_order_id=TestIdStubs.client_order_id(2),
+        )
+        matching_engine.process_order(order2, self.account_id)
+        matching_engine.iterate(timestamp_ns=2)
+
+        filled_events = [m for m in messages if isinstance(m, OrderFilled)]
+        assert len(filled_events) == 1
+        assert filled_events[0].last_qty == Quantity.from_str("400.000")
+        messages.clear()
+
+        # Scenario 3: Size INCREASE resets consumption
+        ask_delta_3 = OrderBookDelta(
+            instrument_id=self.instrument.id,
+            action=BookAction.UPDATE,
+            order=BookOrder(
+                side=OrderSide.SELL,
+                price=Price.from_str("100.00"),
+                size=Quantity.from_str("1500.000"),
+                order_id=100,
+            ),
+            flags=0,
+            sequence=3,
+            ts_event=2,
+            ts_init=2,
+        )
+        matching_engine.process_order_book_delta(ask_delta_3)
+
+        order3 = TestExecStubs.market_order(
+            instrument=self.instrument,
+            order_side=OrderSide.BUY,
+            quantity=self.instrument.make_qty(1000.0),
+            client_order_id=TestIdStubs.client_order_id(3),
+        )
+        matching_engine.process_order(order3, self.account_id)
+        matching_engine.iterate(timestamp_ns=3)
+
+        filled_events = [m for m in messages if isinstance(m, OrderFilled)]
+        assert len(filled_events) == 1
+        assert filled_events[0].last_qty == Quantity.from_str("1000.000")
+        messages.clear()
+
+        # Scenario 4: Size DECREASE resets consumption
+        ask_delta_4 = OrderBookDelta(
+            instrument_id=self.instrument.id,
+            action=BookAction.UPDATE,
+            order=BookOrder(
+                side=OrderSide.SELL,
+                price=Price.from_str("100.00"),
+                size=Quantity.from_str("600.000"),
+                order_id=100,
+            ),
+            flags=0,
+            sequence=4,
+            ts_event=3,
+            ts_init=3,
+        )
+        matching_engine.process_order_book_delta(ask_delta_4)
+
+        order4 = TestExecStubs.market_order(
+            instrument=self.instrument,
+            order_side=OrderSide.BUY,
+            quantity=self.instrument.make_qty(700.0),
+            client_order_id=TestIdStubs.client_order_id(4),
+        )
+        matching_engine.process_order(order4, self.account_id)
+        matching_engine.iterate(timestamp_ns=4)
+
+        filled_events = [m for m in messages if isinstance(m, OrderFilled)]
+        assert len(filled_events) == 1
+        assert filled_events[0].last_qty == Quantity.from_str("600.000")
+        messages.clear()
+
+        # Scenario 5: DELETE then UPDATE (stale book fix)
+        ask_delta_5 = OrderBookDelta(
+            instrument_id=self.instrument.id,
+            action=BookAction.DELETE,
+            order=BookOrder(
+                side=OrderSide.SELL,
+                price=Price.from_str("100.00"),
+                size=Quantity.from_str("0.000"),
+                order_id=100,
+            ),
+            flags=0,
+            sequence=5,
+            ts_event=4,
+            ts_init=4,
+        )
+        matching_engine.process_order_book_delta(ask_delta_5)
+
+        ask_delta_6 = OrderBookDelta(
+            instrument_id=self.instrument.id,
+            action=BookAction.UPDATE,
+            order=BookOrder(
+                side=OrderSide.SELL,
+                price=Price.from_str("100.00"),
+                size=Quantity.from_str("400.000"),
+                order_id=100,
+            ),
+            flags=0,
+            sequence=6,
+            ts_event=5,
+            ts_init=5,
+        )
+        matching_engine.process_order_book_delta(ask_delta_6)
+
+        order5 = TestExecStubs.market_order(
+            instrument=self.instrument,
+            order_side=OrderSide.BUY,
+            quantity=self.instrument.make_qty(400.0),
+            client_order_id=TestIdStubs.client_order_id(5),
+        )
+        matching_engine.process_order(order5, self.account_id)
+        matching_engine.iterate(timestamp_ns=6)
+
+        filled_events = [m for m in messages if isinstance(m, OrderFilled)]
+        assert len(filled_events) == 1
+        assert filled_events[0].last_qty == Quantity.from_str("400.000")
+
+    def test_liquidity_consumption_unrelated_level_update(self):
+        """
+        Tests that updating an unrelated price level does NOT reset consumption tracking
+        at other levels.
+        """
+        matching_engine = OrderMatchingEngine(
+            instrument=self.instrument,
+            raw_id=0,
+            fill_model=FillModel(),
+            fee_model=MakerTakerFeeModel(),
+            book_type=BookType.L2_MBP,
+            oms_type=OmsType.NETTING,
+            account_type=AccountType.MARGIN,
+            reject_stop_orders=True,
+            msgbus=self.msgbus,
+            cache=self.cache,
+            clock=self.clock,
+            liquidity_consumption=True,
+        )
+
+        messages: list[Any] = []
+        self.msgbus.register("ExecEngine.process", messages.append)
+
+        # Arrange: bid and two ask levels
+        bid_delta = OrderBookDelta(
+            instrument_id=self.instrument.id,
+            action=BookAction.ADD,
+            order=BookOrder(
+                side=OrderSide.BUY,
+                price=Price.from_str("90.00"),
+                size=Quantity.from_str("1000.000"),
+                order_id=1,
+            ),
+            flags=0,
+            sequence=0,
+            ts_event=0,
+            ts_init=0,
+        )
+        matching_engine.process_order_book_delta(bid_delta)
+
+        ask_delta_100 = OrderBookDelta(
+            instrument_id=self.instrument.id,
+            action=BookAction.ADD,
+            order=BookOrder(
+                side=OrderSide.SELL,
+                price=Price.from_str("100.00"),
+                size=Quantity.from_str("500.000"),
+                order_id=100,
+            ),
+            flags=0,
+            sequence=1,
+            ts_event=0,
+            ts_init=0,
+        )
+        matching_engine.process_order_book_delta(ask_delta_100)
+
+        ask_delta_99 = OrderBookDelta(
+            instrument_id=self.instrument.id,
+            action=BookAction.ADD,
+            order=BookOrder(
+                side=OrderSide.SELL,
+                price=Price.from_str("99.00"),
+                size=Quantity.from_str("300.000"),
+                order_id=99,
+            ),
+            flags=0,
+            sequence=2,
+            ts_event=0,
+            ts_init=0,
+        )
+        matching_engine.process_order_book_delta(ask_delta_99)
+
+        # Act: consume 200 from 99.00 level
+        order1 = TestExecStubs.market_order(
+            instrument=self.instrument,
+            order_side=OrderSide.BUY,
+            quantity=self.instrument.make_qty(200.0),
+            client_order_id=TestIdStubs.client_order_id(1),
+        )
+        matching_engine.process_order(order1, self.account_id)
+        matching_engine.iterate(timestamp_ns=1)
+
+        filled_events = [m for m in messages if isinstance(m, OrderFilled)]
+        assert len(filled_events) == 1
+        assert filled_events[0].last_qty == Quantity.from_str("200.000")
+        assert filled_events[0].last_px == Price.from_str("99.00")
+        messages.clear()
+
+        # Act: UPDATE the 100.00 level (unrelated to 99.00)
+        ask_delta_100_update = OrderBookDelta(
+            instrument_id=self.instrument.id,
+            action=BookAction.UPDATE,
+            order=BookOrder(
+                side=OrderSide.SELL,
+                price=Price.from_str("100.00"),
+                size=Quantity.from_str("600.000"),
+                order_id=100,
+            ),
+            flags=0,
+            sequence=3,
+            ts_event=1,
+            ts_init=1,
+        )
+        matching_engine.process_order_book_delta(ask_delta_100_update)
+
+        # Act: try to fill more from 99.00 - should only get remaining 100
+        order2 = TestExecStubs.market_order(
+            instrument=self.instrument,
+            order_side=OrderSide.BUY,
+            quantity=self.instrument.make_qty(200.0),
+            client_order_id=TestIdStubs.client_order_id(2),
+        )
+        matching_engine.process_order(order2, self.account_id)
+        matching_engine.iterate(timestamp_ns=2)
+
+        # Assert: consumption at 99.00 preserved despite 100.00 update
+        filled_events = [m for m in messages if isinstance(m, OrderFilled)]
+        assert len(filled_events) == 1
+        assert filled_events[0].last_qty == Quantity.from_str("100.000")
+        assert filled_events[0].last_px == Price.from_str("99.00")
+
+    def test_liquidity_consumption_resets_on_snapshot_flag(self):
+        """
+        Tests that consumption tracking resets when a delta with F_SNAPSHOT flag (value
+        32) arrives, even if the level size is unchanged.
+        """
+        matching_engine = OrderMatchingEngine(
+            instrument=self.instrument,
+            raw_id=0,
+            fill_model=FillModel(),
+            fee_model=MakerTakerFeeModel(),
+            book_type=BookType.L2_MBP,
+            oms_type=OmsType.NETTING,
+            account_type=AccountType.MARGIN,
+            reject_stop_orders=True,
+            msgbus=self.msgbus,
+            cache=self.cache,
+            clock=self.clock,
+            liquidity_consumption=True,
+        )
+
+        messages: list[Any] = []
+        self.msgbus.register("ExecEngine.process", messages.append)
+
+        # Arrange
+        bid_delta = OrderBookDelta(
+            instrument_id=self.instrument.id,
+            action=BookAction.ADD,
+            order=BookOrder(
+                side=OrderSide.BUY,
+                price=Price.from_str("90.00"),
+                size=Quantity.from_str("1000.000"),
+                order_id=1,
+            ),
+            flags=0,
+            sequence=0,
+            ts_event=0,
+            ts_init=0,
+        )
+        matching_engine.process_order_book_delta(bid_delta)
+
+        ask_delta = OrderBookDelta(
+            instrument_id=self.instrument.id,
+            action=BookAction.ADD,
+            order=BookOrder(
+                side=OrderSide.SELL,
+                price=Price.from_str("100.00"),
+                size=Quantity.from_str("500.000"),
+                order_id=100,
+            ),
+            flags=0,
+            sequence=1,
+            ts_event=0,
+            ts_init=0,
+        )
+        matching_engine.process_order_book_delta(ask_delta)
+
+        # Act: consume 300 from the level
+        order1 = TestExecStubs.market_order(
+            instrument=self.instrument,
+            order_side=OrderSide.BUY,
+            quantity=self.instrument.make_qty(300.0),
+            client_order_id=TestIdStubs.client_order_id(1),
+        )
+        matching_engine.process_order(order1, self.account_id)
+        matching_engine.iterate(timestamp_ns=1)
+
+        filled_events = [m for m in messages if isinstance(m, OrderFilled)]
+        assert len(filled_events) == 1
+        assert filled_events[0].last_qty == Quantity.from_str("300.000")
+        messages.clear()
+
+        # Act: snapshot arrives with SAME size (F_SNAPSHOT = 32)
+        snapshot_delta = OrderBookDelta(
+            instrument_id=self.instrument.id,
+            action=BookAction.UPDATE,
+            order=BookOrder(
+                side=OrderSide.SELL,
+                price=Price.from_str("100.00"),
+                size=Quantity.from_str("500.000"),
+                order_id=100,
+            ),
+            flags=32,
+            sequence=2,
+            ts_event=1,
+            ts_init=1,
+        )
+        matching_engine.process_order_book_delta(snapshot_delta)
+
+        # Act: try to fill 400 - should get full 400 since snapshot reset consumption
+        order2 = TestExecStubs.market_order(
+            instrument=self.instrument,
+            order_side=OrderSide.BUY,
+            quantity=self.instrument.make_qty(400.0),
+            client_order_id=TestIdStubs.client_order_id(2),
+        )
+        matching_engine.process_order(order2, self.account_id)
+        matching_engine.iterate(timestamp_ns=2)
+
+        # Assert: full 400 filled (consumption was reset by snapshot)
+        filled_events = [m for m in messages if isinstance(m, OrderFilled)]
+        assert len(filled_events) == 1
+        assert filled_events[0].last_qty == Quantity.from_str("400.000")
+
+    def test_deterministic_maker_fills_at_touch_prob_1(self):
+        """
+        Regression test verifying that with prob_fill_on_limit=1.0, MAKER limit orders
+        at touch fill deterministically when the market moves to their price.
+
+        This tests FillModel behavior, not liquidity consumption.
+
+        """
+        fill_model = FillModel(prob_fill_on_limit=1.0, random_seed=42)
+
+        matching_engine = OrderMatchingEngine(
+            instrument=self.instrument,
+            raw_id=0,
+            fill_model=fill_model,
+            fee_model=MakerTakerFeeModel(),
+            book_type=BookType.L2_MBP,
+            oms_type=OmsType.NETTING,
+            account_type=AccountType.MARGIN,
+            reject_stop_orders=True,
+            msgbus=self.msgbus,
+            cache=self.cache,
+            clock=self.clock,
+            liquidity_consumption=True,
+        )
+
+        messages: list[Any] = []
+        self.msgbus.register("ExecEngine.process", messages.append)
+
+        # Arrange: market with bid=90, ask=110
+        bid_delta = OrderBookDelta(
+            instrument_id=self.instrument.id,
+            action=BookAction.ADD,
+            order=BookOrder(
+                side=OrderSide.BUY,
+                price=Price.from_str("90.00"),
+                size=Quantity.from_str("1000.000"),
+                order_id=1,
+            ),
+            flags=0,
+            sequence=0,
+            ts_event=0,
+            ts_init=0,
+        )
+        matching_engine.process_order_book_delta(bid_delta)
+
+        ask_delta = OrderBookDelta(
+            instrument_id=self.instrument.id,
+            action=BookAction.ADD,
+            order=BookOrder(
+                side=OrderSide.SELL,
+                price=Price.from_str("110.00"),
+                size=Quantity.from_str("1000.000"),
+                order_id=2,
+            ),
+            flags=0,
+            sequence=1,
+            ts_event=0,
+            ts_init=0,
+        )
+        matching_engine.process_order_book_delta(ask_delta)
+
+        # Act: place BUY LIMIT at 100.00 (rests as MAKER since below ask)
+        limit_order = TestExecStubs.limit_order(
+            instrument=self.instrument,
+            order_side=OrderSide.BUY,
+            price=Price.from_str("100.00"),
+            quantity=self.instrument.make_qty(500.0),
+            client_order_id=TestIdStubs.client_order_id(1),
+        )
+        matching_engine.process_order(limit_order, self.account_id)
+        matching_engine.iterate(timestamp_ns=1)
+
+        filled_events = [m for m in messages if isinstance(m, OrderFilled)]
+        accepted_events = [m for m in messages if isinstance(m, OrderAccepted)]
+        assert len(accepted_events) == 1
+        assert len(filled_events) == 0
+        messages.clear()
+
+        # Act: move ask down to 100.00 (touches limit price)
+        ask_update = OrderBookDelta(
+            instrument_id=self.instrument.id,
+            action=BookAction.UPDATE,
+            order=BookOrder(
+                side=OrderSide.SELL,
+                price=Price.from_str("100.00"),
+                size=Quantity.from_str("800.000"),
+                order_id=2,
+            ),
+            flags=0,
+            sequence=2,
+            ts_event=1,
+            ts_init=1,
+        )
+        matching_engine.process_order_book_delta(ask_update)
+        matching_engine.iterate(timestamp_ns=2)
+
+        # Assert: with prob_fill_on_limit=1.0, order fills deterministically as MAKER
+        filled_events = [m for m in messages if isinstance(m, OrderFilled)]
+        assert len(filled_events) == 1
+        assert filled_events[0].last_qty == Quantity.from_str("500.000")
+        assert filled_events[0].last_px == Price.from_str("100.00")
+        assert filled_events[0].liquidity_side == LiquiditySide.MAKER
+
+    def test_taker_fills_regardless_of_prob_fill_on_limit(self):
+        """
+        Test that TAKER orders (crossing the spread) fill regardless of
+        prob_fill_on_limit setting, since that only affects MAKER orders.
+        """
+        fill_model = FillModel(prob_fill_on_limit=0.0, random_seed=42)
+
+        matching_engine = OrderMatchingEngine(
+            instrument=self.instrument,
+            raw_id=0,
+            fill_model=fill_model,
+            fee_model=MakerTakerFeeModel(),
+            book_type=BookType.L2_MBP,
+            oms_type=OmsType.NETTING,
+            account_type=AccountType.MARGIN,
+            reject_stop_orders=True,
+            msgbus=self.msgbus,
+            cache=self.cache,
+            clock=self.clock,
+            liquidity_consumption=True,
+        )
+
+        messages: list[Any] = []
+        self.msgbus.register("ExecEngine.process", messages.append)
+
+        # Arrange: market with bid=90, ask=100
+        bid_delta = OrderBookDelta(
+            instrument_id=self.instrument.id,
+            action=BookAction.ADD,
+            order=BookOrder(
+                side=OrderSide.BUY,
+                price=Price.from_str("90.00"),
+                size=Quantity.from_str("1000.000"),
+                order_id=1,
+            ),
+            flags=0,
+            sequence=0,
+            ts_event=0,
+            ts_init=0,
+        )
+        matching_engine.process_order_book_delta(bid_delta)
+
+        ask_delta = OrderBookDelta(
+            instrument_id=self.instrument.id,
+            action=BookAction.ADD,
+            order=BookOrder(
+                side=OrderSide.SELL,
+                price=Price.from_str("100.00"),
+                size=Quantity.from_str("1000.000"),
+                order_id=2,
+            ),
+            flags=0,
+            sequence=1,
+            ts_event=0,
+            ts_init=0,
+        )
+        matching_engine.process_order_book_delta(ask_delta)
+
+        # Act: BUY LIMIT at 100.00 (equals ask, crosses as TAKER)
+        limit_order = TestExecStubs.limit_order(
+            instrument=self.instrument,
+            order_side=OrderSide.BUY,
+            price=Price.from_str("100.00"),
+            quantity=self.instrument.make_qty(500.0),
+            client_order_id=TestIdStubs.client_order_id(1),
+        )
+        matching_engine.process_order(limit_order, self.account_id)
+        matching_engine.iterate(timestamp_ns=1)
+
+        # Assert: fills as TAKER regardless of prob_fill_on_limit
+        filled_events = [m for m in messages if isinstance(m, OrderFilled)]
+        assert len(filled_events) == 1
+        assert filled_events[0].last_qty == Quantity.from_str("500.000")
+        assert filled_events[0].liquidity_side == LiquiditySide.TAKER
+
+    def test_maker_fills_when_ask_crosses_below_limit(self):
+        """
+        Tests that a resting BUY LIMIT fills when ask crosses BELOW the limit price (not
+        just at touch).
+        """
+        fill_model = FillModel(prob_fill_on_limit=1.0, random_seed=42)
+
+        matching_engine = OrderMatchingEngine(
+            instrument=self.instrument,
+            raw_id=0,
+            fill_model=fill_model,
+            fee_model=MakerTakerFeeModel(),
+            book_type=BookType.L2_MBP,
+            oms_type=OmsType.NETTING,
+            account_type=AccountType.MARGIN,
+            reject_stop_orders=True,
+            msgbus=self.msgbus,
+            cache=self.cache,
+            clock=self.clock,
+            liquidity_consumption=True,
+        )
+
+        messages: list[Any] = []
+        self.msgbus.register("ExecEngine.process", messages.append)
+
+        # Arrange: market with bid=90, ask=110
+        bid_delta = OrderBookDelta(
+            instrument_id=self.instrument.id,
+            action=BookAction.ADD,
+            order=BookOrder(
+                side=OrderSide.BUY,
+                price=Price.from_str("90.00"),
+                size=Quantity.from_str("1000.000"),
+                order_id=1,
+            ),
+            flags=0,
+            sequence=0,
+            ts_event=0,
+            ts_init=0,
+        )
+        matching_engine.process_order_book_delta(bid_delta)
+
+        ask_delta = OrderBookDelta(
+            instrument_id=self.instrument.id,
+            action=BookAction.ADD,
+            order=BookOrder(
+                side=OrderSide.SELL,
+                price=Price.from_str("110.00"),
+                size=Quantity.from_str("1000.000"),
+                order_id=2,
+            ),
+            flags=0,
+            sequence=1,
+            ts_event=0,
+            ts_init=0,
+        )
+        matching_engine.process_order_book_delta(ask_delta)
+
+        # Act: place BUY LIMIT at 100.00 (rests as MAKER)
+        limit_order = TestExecStubs.limit_order(
+            instrument=self.instrument,
+            order_side=OrderSide.BUY,
+            price=Price.from_str("100.00"),
+            quantity=self.instrument.make_qty(500.0),
+            client_order_id=TestIdStubs.client_order_id(1),
+        )
+        matching_engine.process_order(limit_order, self.account_id)
+        matching_engine.iterate(timestamp_ns=1)
+
+        filled_events = [m for m in messages if isinstance(m, OrderFilled)]
+        assert len(filled_events) == 0
+        messages.clear()
+
+        # Act: ask crosses BELOW limit to 99.00
+        ask_update = OrderBookDelta(
+            instrument_id=self.instrument.id,
+            action=BookAction.UPDATE,
+            order=BookOrder(
+                side=OrderSide.SELL,
+                price=Price.from_str("99.00"),
+                size=Quantity.from_str("200.000"),
+                order_id=2,
+            ),
+            flags=0,
+            sequence=2,
+            ts_event=1,
+            ts_init=1,
+        )
+        matching_engine.process_order_book_delta(ask_update)
+        matching_engine.iterate(timestamp_ns=2)
+
+        # Assert: order fills as MAKER (fills at limit price 100.00)
+        filled_events = [m for m in messages if isinstance(m, OrderFilled)]
+        assert len(filled_events) == 1
+        assert filled_events[0].last_qty == Quantity.from_str("200.000")
+        assert filled_events[0].last_px == Price.from_str("100.00")
+        assert filled_events[0].liquidity_side == LiquiditySide.MAKER
+
+    def test_liquidity_consumption_resets_on_depth10_snapshot_flag(self):
+        """
+        Tests that consumption tracking resets when an OrderBookDepth10 with F_SNAPSHOT
+        flag (value 32) arrives.
+        """
+        matching_engine = OrderMatchingEngine(
+            instrument=self.instrument,
+            raw_id=0,
+            fill_model=FillModel(),
+            fee_model=MakerTakerFeeModel(),
+            book_type=BookType.L2_MBP,
+            oms_type=OmsType.NETTING,
+            account_type=AccountType.MARGIN,
+            reject_stop_orders=True,
+            msgbus=self.msgbus,
+            cache=self.cache,
+            clock=self.clock,
+            liquidity_consumption=True,
+        )
+
+        messages: list[Any] = []
+        self.msgbus.register("ExecEngine.process", messages.append)
+
+        # Arrange: set up book with depth10
+        depth = OrderBookDepth10(
+            instrument_id=self.instrument.id,
+            bids=[
+                BookOrder(
+                    side=OrderSide.BUY,
+                    price=Price.from_str("90.00"),
+                    size=Quantity.from_str("1000.000"),
+                    order_id=1,
+                ),
+            ],
+            asks=[
+                BookOrder(
+                    side=OrderSide.SELL,
+                    price=Price.from_str("100.00"),
+                    size=Quantity.from_str("500.000"),
+                    order_id=100,
+                ),
+            ],
+            bid_counts=[1],
+            ask_counts=[1],
+            flags=0,
+            sequence=0,
+            ts_event=0,
+            ts_init=0,
+        )
+        matching_engine.process_order_book_depth10(depth)
+
+        # Act: consume 300 from the level
+        order1 = TestExecStubs.market_order(
+            instrument=self.instrument,
+            order_side=OrderSide.BUY,
+            quantity=self.instrument.make_qty(300.0),
+            client_order_id=TestIdStubs.client_order_id(1),
+        )
+        matching_engine.process_order(order1, self.account_id)
+        matching_engine.iterate(timestamp_ns=1)
+
+        filled_events = [m for m in messages if isinstance(m, OrderFilled)]
+        assert len(filled_events) == 1
+        assert filled_events[0].last_qty == Quantity.from_str("300.000")
+        messages.clear()
+
+        # Act: depth10 snapshot arrives with SAME size (F_SNAPSHOT = 32)
+        snapshot_depth = OrderBookDepth10(
+            instrument_id=self.instrument.id,
+            bids=[
+                BookOrder(
+                    side=OrderSide.BUY,
+                    price=Price.from_str("90.00"),
+                    size=Quantity.from_str("1000.000"),
+                    order_id=1,
+                ),
+            ],
+            asks=[
+                BookOrder(
+                    side=OrderSide.SELL,
+                    price=Price.from_str("100.00"),
+                    size=Quantity.from_str("500.000"),
+                    order_id=100,
+                ),
+            ],
+            bid_counts=[1],
+            ask_counts=[1],
+            flags=32,
+            sequence=1,
+            ts_event=1,
+            ts_init=1,
+        )
+        matching_engine.process_order_book_depth10(snapshot_depth)
+
+        # Act: try to fill 400 - should get full 400 since snapshot reset consumption
+        order2 = TestExecStubs.market_order(
+            instrument=self.instrument,
+            order_side=OrderSide.BUY,
+            quantity=self.instrument.make_qty(400.0),
+            client_order_id=TestIdStubs.client_order_id(2),
+        )
+        matching_engine.process_order(order2, self.account_id)
+        matching_engine.iterate(timestamp_ns=2)
+
+        # Assert: full 400 filled (consumption was reset by snapshot)
+        filled_events = [m for m in messages if isinstance(m, OrderFilled)]
+        assert len(filled_events) == 1
+        assert filled_events[0].last_qty == Quantity.from_str("400.000")
+
+    def test_liquidity_consumption_clears_on_delete(self):
+        """
+        Tests that consumption tracking is cleared when a level is deleted, allowing
+        fills when the level reappears with the same size.
+        """
+        matching_engine = OrderMatchingEngine(
+            instrument=self.instrument,
+            raw_id=0,
+            fill_model=FillModel(),
+            fee_model=MakerTakerFeeModel(),
+            book_type=BookType.L2_MBP,
+            oms_type=OmsType.NETTING,
+            account_type=AccountType.MARGIN,
+            reject_stop_orders=True,
+            msgbus=self.msgbus,
+            cache=self.cache,
+            clock=self.clock,
+            liquidity_consumption=True,
+        )
+
+        messages: list[Any] = []
+        self.msgbus.register("ExecEngine.process", messages.append)
+
+        # Arrange: set up book with bid and ask
+        bid_delta = OrderBookDelta(
+            instrument_id=self.instrument.id,
+            action=BookAction.ADD,
+            order=BookOrder(
+                side=OrderSide.BUY,
+                price=Price.from_str("90.00"),
+                size=Quantity.from_str("1000.000"),
+                order_id=1,
+            ),
+            flags=0,
+            sequence=0,
+            ts_event=0,
+            ts_init=0,
+        )
+        matching_engine.process_order_book_delta(bid_delta)
+
+        ask_delta = OrderBookDelta(
+            instrument_id=self.instrument.id,
+            action=BookAction.ADD,
+            order=BookOrder(
+                side=OrderSide.SELL,
+                price=Price.from_str("100.00"),
+                size=Quantity.from_str("500.000"),
+                order_id=100,
+            ),
+            flags=0,
+            sequence=1,
+            ts_event=0,
+            ts_init=0,
+        )
+        matching_engine.process_order_book_delta(ask_delta)
+
+        # Act: consume ALL 500 from the level
+        order1 = TestExecStubs.market_order(
+            instrument=self.instrument,
+            order_side=OrderSide.BUY,
+            quantity=self.instrument.make_qty(500.0),
+            client_order_id=TestIdStubs.client_order_id(1),
+        )
+        matching_engine.process_order(order1, self.account_id)
+        matching_engine.iterate(timestamp_ns=1)
+
+        filled_events = [m for m in messages if isinstance(m, OrderFilled)]
+        assert len(filled_events) == 1
+        assert filled_events[0].last_qty == Quantity.from_str("500.000")
+        messages.clear()
+
+        # Act: DELETE the level (removes it from book)
+        delete_delta = OrderBookDelta(
+            instrument_id=self.instrument.id,
+            action=BookAction.DELETE,
+            order=BookOrder(
+                side=OrderSide.SELL,
+                price=Price.from_str("100.00"),
+                size=Quantity.from_str("0.000"),
+                order_id=100,
+            ),
+            flags=0,
+            sequence=2,
+            ts_event=1,
+            ts_init=1,
+        )
+        matching_engine.process_order_book_delta(delete_delta)
+
+        # Act: re-ADD the level with SAME size (500)
+        readd_delta = OrderBookDelta(
+            instrument_id=self.instrument.id,
+            action=BookAction.ADD,
+            order=BookOrder(
+                side=OrderSide.SELL,
+                price=Price.from_str("100.00"),
+                size=Quantity.from_str("500.000"),
+                order_id=101,
+            ),
+            flags=0,
+            sequence=3,
+            ts_event=2,
+            ts_init=2,
+        )
+        matching_engine.process_order_book_delta(readd_delta)
+
+        # Act: try to fill 300 - should succeed since DELETE cleared consumption
+        order2 = TestExecStubs.market_order(
+            instrument=self.instrument,
+            order_side=OrderSide.BUY,
+            quantity=self.instrument.make_qty(300.0),
+            client_order_id=TestIdStubs.client_order_id(2),
+        )
+        matching_engine.process_order(order2, self.account_id)
+        matching_engine.iterate(timestamp_ns=3)
+
+        # Assert: full 300 filled (consumption was cleared by DELETE)
+        filled_events = [m for m in messages if isinstance(m, OrderFilled)]
+        assert len(filled_events) == 1
+        assert filled_events[0].last_qty == Quantity.from_str("300.000")
+
+    def test_liquidity_consumption_clears_on_update(self):
+        """
+        Tests that consumption tracking is cleared when a level is updated, even with
+        the same size.
+
+        This is correct for L3/MBO data where the same aggregate size could be backed by
+        different orders.
+
+        """
+        matching_engine = OrderMatchingEngine(
+            instrument=self.instrument,
+            raw_id=0,
+            fill_model=FillModel(),
+            fee_model=MakerTakerFeeModel(),
+            book_type=BookType.L2_MBP,
+            oms_type=OmsType.NETTING,
+            account_type=AccountType.MARGIN,
+            reject_stop_orders=True,
+            msgbus=self.msgbus,
+            cache=self.cache,
+            clock=self.clock,
+            liquidity_consumption=True,
+        )
+
+        messages: list[Any] = []
+        self.msgbus.register("ExecEngine.process", messages.append)
+
+        # Arrange: set up book with bid and ask
+        bid_delta = OrderBookDelta(
+            instrument_id=self.instrument.id,
+            action=BookAction.ADD,
+            order=BookOrder(
+                side=OrderSide.BUY,
+                price=Price.from_str("90.00"),
+                size=Quantity.from_str("1000.000"),
+                order_id=1,
+            ),
+            flags=0,
+            sequence=0,
+            ts_event=0,
+            ts_init=0,
+        )
+        matching_engine.process_order_book_delta(bid_delta)
+
+        ask_delta = OrderBookDelta(
+            instrument_id=self.instrument.id,
+            action=BookAction.ADD,
+            order=BookOrder(
+                side=OrderSide.SELL,
+                price=Price.from_str("100.00"),
+                size=Quantity.from_str("500.000"),
+                order_id=100,
+            ),
+            flags=0,
+            sequence=1,
+            ts_event=0,
+            ts_init=0,
+        )
+        matching_engine.process_order_book_delta(ask_delta)
+
+        # Act: consume ALL 500 from the level
+        order1 = TestExecStubs.market_order(
+            instrument=self.instrument,
+            order_side=OrderSide.BUY,
+            quantity=self.instrument.make_qty(500.0),
+            client_order_id=TestIdStubs.client_order_id(1),
+        )
+        matching_engine.process_order(order1, self.account_id)
+        matching_engine.iterate(timestamp_ns=1)
+
+        filled_events = [m for m in messages if isinstance(m, OrderFilled)]
+        assert len(filled_events) == 1
+        assert filled_events[0].last_qty == Quantity.from_str("500.000")
+        messages.clear()
+
+        # Act: UPDATE the level with SAME size (500) - should clear consumption
+        update_delta = OrderBookDelta(
+            instrument_id=self.instrument.id,
+            action=BookAction.UPDATE,
+            order=BookOrder(
+                side=OrderSide.SELL,
+                price=Price.from_str("100.00"),
+                size=Quantity.from_str("500.000"),
+                order_id=100,
+            ),
+            flags=0,
+            sequence=2,
+            ts_event=1,
+            ts_init=1,
+        )
+        matching_engine.process_order_book_delta(update_delta)
+
+        # Act: try to fill 300 - should succeed since UPDATE cleared consumption
+        order2 = TestExecStubs.market_order(
+            instrument=self.instrument,
+            order_side=OrderSide.BUY,
+            quantity=self.instrument.make_qty(300.0),
+            client_order_id=TestIdStubs.client_order_id(2),
+        )
+        matching_engine.process_order(order2, self.account_id)
+        matching_engine.iterate(timestamp_ns=2)
+
+        # Assert: full 300 filled (consumption was cleared by UPDATE)
+        filled_events = [m for m in messages if isinstance(m, OrderFilled)]
+        assert len(filled_events) == 1
+        assert filled_events[0].last_qty == Quantity.from_str("300.000")
+
+    @pytest.mark.parametrize(
+        "order_side",
+        [OrderSide.BUY, OrderSide.SELL],
+    )
+    def test_liquidity_consumption_tracks_fills_at_multiple_price_levels(
+        self,
+        order_side: OrderSide,
+    ):
+        """
+        Regression test for liquidity consumption tracking at multiple price levels.
+
+        When an order fills across multiple price levels, consumption must be tracked
+        separately at each original book price level. This test verifies that after
+        consuming liquidity at multiple levels, subsequent orders cannot access that
+        consumed liquidity.
+
+        """
+        matching_engine = OrderMatchingEngine(
+            instrument=self.instrument,
+            raw_id=0,
+            fill_model=FillModel(),
+            fee_model=MakerTakerFeeModel(),
+            book_type=BookType.L2_MBP,
+            oms_type=OmsType.NETTING,
+            account_type=AccountType.MARGIN,
+            reject_stop_orders=True,
+            msgbus=self.msgbus,
+            cache=self.cache,
+            clock=self.clock,
+            liquidity_consumption=True,
+        )
+
+        messages: list[Any] = []
+        self.msgbus.register("ExecEngine.process", messages.append)
+
+        if order_side == OrderSide.BUY:
+            # Arrange: bid at 90, asks at 99, 100, 101 (50 qty each at 99/100)
+            bid_delta = OrderBookDelta(
+                instrument_id=self.instrument.id,
+                action=BookAction.ADD,
+                order=BookOrder(
+                    side=OrderSide.BUY,
+                    price=Price.from_str("90.00"),
+                    size=Quantity.from_str("1000.000"),
+                    order_id=100,
+                ),
+                flags=0,
+                sequence=0,
+                ts_event=0,
+                ts_init=0,
+            )
+            matching_engine.process_order_book_delta(bid_delta)
+
+            ask1 = OrderBookDelta(
+                instrument_id=self.instrument.id,
+                action=BookAction.ADD,
+                order=BookOrder(
+                    side=OrderSide.SELL,
+                    price=Price.from_str("99.00"),
+                    size=Quantity.from_str("50.000"),
+                    order_id=1,
+                ),
+                flags=0,
+                sequence=1,
+                ts_event=0,
+                ts_init=0,
+            )
+            matching_engine.process_order_book_delta(ask1)
+
+            ask2 = OrderBookDelta(
+                instrument_id=self.instrument.id,
+                action=BookAction.ADD,
+                order=BookOrder(
+                    side=OrderSide.SELL,
+                    price=Price.from_str("100.00"),
+                    size=Quantity.from_str("50.000"),
+                    order_id=2,
+                ),
+                flags=0,
+                sequence=2,
+                ts_event=0,
+                ts_init=0,
+            )
+            matching_engine.process_order_book_delta(ask2)
+
+            ask3 = OrderBookDelta(
+                instrument_id=self.instrument.id,
+                action=BookAction.ADD,
+                order=BookOrder(
+                    side=OrderSide.SELL,
+                    price=Price.from_str("101.00"),
+                    size=Quantity.from_str("100.000"),
+                    order_id=3,
+                ),
+                flags=0,
+                sequence=3,
+                ts_event=0,
+                ts_init=0,
+            )
+            matching_engine.process_order_book_delta(ask3)
+
+            limit_price = Price.from_str("100.00")
+        else:
+            # Arrange: ask at 110, bids at 101, 100, 99 (50 qty each at 101/100)
+            ask_delta = OrderBookDelta(
+                instrument_id=self.instrument.id,
+                action=BookAction.ADD,
+                order=BookOrder(
+                    side=OrderSide.SELL,
+                    price=Price.from_str("110.00"),
+                    size=Quantity.from_str("1000.000"),
+                    order_id=100,
+                ),
+                flags=0,
+                sequence=0,
+                ts_event=0,
+                ts_init=0,
+            )
+            matching_engine.process_order_book_delta(ask_delta)
+
+            bid1 = OrderBookDelta(
+                instrument_id=self.instrument.id,
+                action=BookAction.ADD,
+                order=BookOrder(
+                    side=OrderSide.BUY,
+                    price=Price.from_str("101.00"),
+                    size=Quantity.from_str("50.000"),
+                    order_id=1,
+                ),
+                flags=0,
+                sequence=1,
+                ts_event=0,
+                ts_init=0,
+            )
+            matching_engine.process_order_book_delta(bid1)
+
+            bid2 = OrderBookDelta(
+                instrument_id=self.instrument.id,
+                action=BookAction.ADD,
+                order=BookOrder(
+                    side=OrderSide.BUY,
+                    price=Price.from_str("100.00"),
+                    size=Quantity.from_str("50.000"),
+                    order_id=2,
+                ),
+                flags=0,
+                sequence=2,
+                ts_event=0,
+                ts_init=0,
+            )
+            matching_engine.process_order_book_delta(bid2)
+
+            bid3 = OrderBookDelta(
+                instrument_id=self.instrument.id,
+                action=BookAction.ADD,
+                order=BookOrder(
+                    side=OrderSide.BUY,
+                    price=Price.from_str("99.00"),
+                    size=Quantity.from_str("100.000"),
+                    order_id=3,
+                ),
+                flags=0,
+                sequence=3,
+                ts_event=0,
+                ts_init=0,
+            )
+            matching_engine.process_order_book_delta(bid3)
+
+            limit_price = Price.from_str("100.00")
+
+        # Act: first order crosses both levels (50 + 50 = 100 total)
+        order1 = TestExecStubs.limit_order(
+            instrument=self.instrument,
+            order_side=order_side,
+            quantity=self.instrument.make_qty(100.0),
+            price=limit_price,
+            client_order_id=TestIdStubs.client_order_id(1),
+        )
+        matching_engine.process_order(order1, self.account_id)
+        matching_engine.iterate(timestamp_ns=1)
+
+        filled_events = [m for m in messages if isinstance(m, OrderFilled)]
+        order1_fills = [f for f in filled_events if f.client_order_id.value.endswith("-1")]
+        total_order1 = sum((f.last_qty for f in order1_fills), Quantity.zero(3))
+        assert total_order1 == Quantity.from_str("100.000"), "First order should fill 100"
+
+        messages.clear()
+
+        # Act: second order attempts to fill from consumed levels
+        order2 = TestExecStubs.limit_order(
+            instrument=self.instrument,
+            order_side=order_side,
+            quantity=self.instrument.make_qty(50.0),
+            price=limit_price,
+            client_order_id=TestIdStubs.client_order_id(2),
+        )
+        matching_engine.process_order(order2, self.account_id)
+        matching_engine.iterate(timestamp_ns=2)
+
+        # Assert: no fill since both levels are consumed
+        filled_events = [m for m in messages if isinstance(m, OrderFilled)]
+        order2_fills = [f for f in filled_events if f.client_order_id.value.endswith("-2")]
+        total_order2 = sum((f.last_qty for f in order2_fills), Quantity.zero(3))
+        assert total_order2 == Quantity.zero(3), (
+            "Second order should NOT fill - both price levels should be consumed. "
+            f"Got fill of {total_order2}. If this fails, consumption was incorrectly "
+            "tracked at wrong price levels."
+        )
+
+    def test_fok_order_canceled_when_liquidity_consumption_exhausts_fills(self):
+        """
+        Test that FOK orders are properly canceled when liquidity consumption results in
+        no available fills.
+        """
+        exec_engine = ExecutionEngine(
+            msgbus=self.msgbus,
+            cache=self.cache,
+            clock=self.clock,
+        )
+        _ = exec_engine  # Registers handlers on msgbus
+
+        matching_engine = OrderMatchingEngine(
+            instrument=self.instrument,
+            raw_id=0,
+            fill_model=FillModel(),
+            fee_model=MakerTakerFeeModel(),
+            book_type=BookType.L2_MBP,
+            oms_type=OmsType.NETTING,
+            account_type=AccountType.MARGIN,
+            reject_stop_orders=True,
+            msgbus=self.msgbus,
+            cache=self.cache,
+            clock=self.clock,
+            liquidity_consumption=True,
+        )
+
+        events: list[Any] = []
+        self.msgbus.subscribe("events.order.*", events.append)
+
+        bid_delta = OrderBookDelta(
+            instrument_id=self.instrument.id,
+            action=BookAction.ADD,
+            order=BookOrder(
+                side=OrderSide.BUY,
+                price=Price.from_str("90.00"),
+                size=Quantity.from_str("100.000"),
+                order_id=100,
+            ),
+            flags=0,
+            sequence=0,
+            ts_event=0,
+            ts_init=0,
+        )
+        matching_engine.process_order_book_delta(bid_delta)
+
+        # Add 50 units of liquidity at ask 100.00
+        ask_delta = OrderBookDelta(
+            instrument_id=self.instrument.id,
+            action=BookAction.ADD,
+            order=BookOrder(
+                side=OrderSide.SELL,
+                price=Price.from_str("100.00"),
+                size=Quantity.from_str("50.000"),
+                order_id=1,
+            ),
+            flags=0,
+            sequence=1,
+            ts_event=0,
+            ts_init=0,
+        )
+        matching_engine.process_order_book_delta(ask_delta)
+
+        # First order consumes all liquidity
+        order1 = TestExecStubs.market_order(
+            instrument=self.instrument,
+            order_side=OrderSide.BUY,
+            quantity=self.instrument.make_qty(50.0),
+            client_order_id=TestIdStubs.client_order_id(1),
+        )
+        self.cache.add_order(order1)
+        matching_engine.process_order(order1, self.account_id)
+        matching_engine.iterate(timestamp_ns=1)
+        events.clear()
+
+        # FOK order should be canceled since no liquidity remains
+        fok_order = TestExecStubs.limit_order(
+            instrument=self.instrument,
+            order_side=OrderSide.BUY,
+            price=Price.from_str("100.00"),
+            quantity=self.instrument.make_qty(30.0),
+            time_in_force=TimeInForce.FOK,
+            client_order_id=TestIdStubs.client_order_id(2),
+        )
+        self.cache.add_order(fok_order)
+        matching_engine.process_order(fok_order, self.account_id)
+        matching_engine.iterate(timestamp_ns=2)
+
+        canceled_events = [e for e in events if isinstance(e, OrderCanceled)]
+        assert len(canceled_events) == 1
+        assert canceled_events[0].client_order_id == fok_order.client_order_id
+
+    def test_ioc_order_canceled_when_liquidity_consumption_exhausts_fills(self):
+        """
+        Test that IOC orders are properly canceled when liquidity consumption results in
+        no available fills.
+        """
+        exec_engine = ExecutionEngine(
+            msgbus=self.msgbus,
+            cache=self.cache,
+            clock=self.clock,
+        )
+        _ = exec_engine  # Registers handlers on msgbus
+
+        matching_engine = OrderMatchingEngine(
+            instrument=self.instrument,
+            raw_id=0,
+            fill_model=FillModel(),
+            fee_model=MakerTakerFeeModel(),
+            book_type=BookType.L2_MBP,
+            oms_type=OmsType.NETTING,
+            account_type=AccountType.MARGIN,
+            reject_stop_orders=True,
+            msgbus=self.msgbus,
+            cache=self.cache,
+            clock=self.clock,
+            liquidity_consumption=True,
+        )
+
+        events: list[Any] = []
+        self.msgbus.subscribe("events.order.*", events.append)
+
+        bid_delta = OrderBookDelta(
+            instrument_id=self.instrument.id,
+            action=BookAction.ADD,
+            order=BookOrder(
+                side=OrderSide.BUY,
+                price=Price.from_str("90.00"),
+                size=Quantity.from_str("100.000"),
+                order_id=100,
+            ),
+            flags=0,
+            sequence=0,
+            ts_event=0,
+            ts_init=0,
+        )
+        matching_engine.process_order_book_delta(bid_delta)
+
+        # Add 50 units of liquidity at ask 100.00
+        ask_delta = OrderBookDelta(
+            instrument_id=self.instrument.id,
+            action=BookAction.ADD,
+            order=BookOrder(
+                side=OrderSide.SELL,
+                price=Price.from_str("100.00"),
+                size=Quantity.from_str("50.000"),
+                order_id=1,
+            ),
+            flags=0,
+            sequence=1,
+            ts_event=0,
+            ts_init=0,
+        )
+        matching_engine.process_order_book_delta(ask_delta)
+
+        # First order consumes all liquidity
+        order1 = TestExecStubs.market_order(
+            instrument=self.instrument,
+            order_side=OrderSide.BUY,
+            quantity=self.instrument.make_qty(50.0),
+            client_order_id=TestIdStubs.client_order_id(1),
+        )
+        self.cache.add_order(order1)
+        matching_engine.process_order(order1, self.account_id)
+        matching_engine.iterate(timestamp_ns=1)
+        events.clear()
+
+        # IOC order should be canceled since no liquidity remains
+        ioc_order = TestExecStubs.limit_order(
+            instrument=self.instrument,
+            order_side=OrderSide.BUY,
+            price=Price.from_str("100.00"),
+            quantity=self.instrument.make_qty(30.0),
+            time_in_force=TimeInForce.IOC,
+            client_order_id=TestIdStubs.client_order_id(2),
+        )
+        self.cache.add_order(ioc_order)
+        matching_engine.process_order(ioc_order, self.account_id)
+        matching_engine.iterate(timestamp_ns=2)
+
+        canceled_events = [e for e in events if isinstance(e, OrderCanceled)]
+        assert len(canceled_events) == 1
+        assert canceled_events[0].client_order_id == ioc_order.client_order_id
+
+    def test_gtc_order_not_canceled_when_liquidity_consumption_exhausts_fills(self):
+        """
+        Test that GTC orders are NOT canceled when liquidity consumption results in no
+        available fills (they remain open for future fills).
+        """
+        matching_engine = OrderMatchingEngine(
+            instrument=self.instrument,
+            raw_id=0,
+            fill_model=FillModel(),
+            fee_model=MakerTakerFeeModel(),
+            book_type=BookType.L2_MBP,
+            oms_type=OmsType.NETTING,
+            account_type=AccountType.MARGIN,
+            reject_stop_orders=True,
+            msgbus=self.msgbus,
+            cache=self.cache,
+            clock=self.clock,
+            liquidity_consumption=True,
+        )
+
+        messages: list[Any] = []
+        self.msgbus.register("ExecEngine.process", messages.append)
+
+        bid_delta = OrderBookDelta(
+            instrument_id=self.instrument.id,
+            action=BookAction.ADD,
+            order=BookOrder(
+                side=OrderSide.BUY,
+                price=Price.from_str("90.00"),
+                size=Quantity.from_str("100.000"),
+                order_id=100,
+            ),
+            flags=0,
+            sequence=0,
+            ts_event=0,
+            ts_init=0,
+        )
+        matching_engine.process_order_book_delta(bid_delta)
+
+        # Add 50 units of liquidity at ask 100.00
+        ask_delta = OrderBookDelta(
+            instrument_id=self.instrument.id,
+            action=BookAction.ADD,
+            order=BookOrder(
+                side=OrderSide.SELL,
+                price=Price.from_str("100.00"),
+                size=Quantity.from_str("50.000"),
+                order_id=1,
+            ),
+            flags=0,
+            sequence=1,
+            ts_event=0,
+            ts_init=0,
+        )
+        matching_engine.process_order_book_delta(ask_delta)
+
+        # First order consumes all liquidity
+        order1 = TestExecStubs.market_order(
+            instrument=self.instrument,
+            order_side=OrderSide.BUY,
+            quantity=self.instrument.make_qty(50.0),
+            client_order_id=TestIdStubs.client_order_id(1),
+        )
+        matching_engine.process_order(order1, self.account_id)
+        matching_engine.iterate(timestamp_ns=1)
+        messages.clear()
+
+        # GTC order should NOT be canceled - it should remain open
+        gtc_order = TestExecStubs.limit_order(
+            instrument=self.instrument,
+            order_side=OrderSide.BUY,
+            price=Price.from_str("100.00"),
+            quantity=self.instrument.make_qty(30.0),
+            time_in_force=TimeInForce.GTC,
+            client_order_id=TestIdStubs.client_order_id(2),
+        )
+        matching_engine.process_order(gtc_order, self.account_id)
+        matching_engine.iterate(timestamp_ns=2)
+
+        canceled_events = [m for m in messages if isinstance(m, OrderCanceled)]
+        filled_events = [m for m in messages if isinstance(m, OrderFilled)]
+
+        # No cancel, no fill - order remains open
+        assert len(canceled_events) == 0
+        assert len(filled_events) == 0
+
+    @pytest.mark.parametrize(
+        ("order_side", "aggressor_side"),
+        [
+            (OrderSide.BUY, AggressorSide.SELLER),
+            (OrderSide.SELL, AggressorSide.BUYER),
+        ],
+    )
+    def test_trade_execution_fill_model_at_limit_with_prob_zero_does_not_fill(
+        self,
+        order_side: OrderSide,
+        aggressor_side: AggressorSide,
+    ):
+        """
+        Test that when trade price equals limit price exactly, the fill model
+        probability check is used.
+
+        With prob_fill_on_limit=0.0, the order should not fill from trade execution
+        (simulates being at back of queue).
+
+        """
+        fill_model = FillModel(prob_fill_on_limit=0.0, random_seed=42)
+
+        matching_engine = OrderMatchingEngine(
+            instrument=self.instrument,
+            raw_id=0,
+            fill_model=fill_model,
+            fee_model=MakerTakerFeeModel(),
+            book_type=BookType.L1_MBP,
+            oms_type=OmsType.NETTING,
+            account_type=AccountType.MARGIN,
+            reject_stop_orders=True,
+            trade_execution=True,
+            msgbus=self.msgbus,
+            cache=self.cache,
+            clock=self.clock,
+        )
+
+        messages: list[Any] = []
+        self.msgbus.register("ExecEngine.process", messages.append)
+
+        # Set initial market state
+        quote = TestDataStubs.quote_tick(
+            instrument=self.instrument,
+            bid_price=211.30,
+            ask_price=211.40,
+        )
+        matching_engine.process_quote_tick(quote)
+
+        # Place limit order at 211.35 (in the spread)
+        order = TestExecStubs.limit_order(
+            instrument=self.instrument,
+            order_side=order_side,
+            price=Price.from_str("211.35"),
+            quantity=self.instrument.make_qty(1.0),
+        )
+        matching_engine.process_order(order, self.account_id)
+        messages.clear()
+
+        # Trade at exactly the limit price
+        trade = TestDataStubs.trade_tick(
+            instrument=self.instrument,
+            price=211.35,
+            aggressor_side=aggressor_side,
+        )
+        matching_engine.process_trade_tick(trade)
+
+        filled_events = [m for m in messages if isinstance(m, OrderFilled)]
+        assert len(filled_events) == 0, (
+            "Order should NOT fill when trade at limit price with prob_fill_on_limit=0.0"
+        )
+
+    @pytest.mark.parametrize(
+        ("order_side", "aggressor_side"),
+        [
+            (OrderSide.BUY, AggressorSide.SELLER),
+            (OrderSide.SELL, AggressorSide.BUYER),
+        ],
+    )
+    def test_trade_execution_fill_model_at_limit_with_prob_one_fills(
+        self,
+        order_side: OrderSide,
+        aggressor_side: AggressorSide,
+    ):
+        """
+        Test that when trade price equals limit price exactly, with
+        prob_fill_on_limit=1.0 the order fills deterministically.
+        """
+        fill_model = FillModel(prob_fill_on_limit=1.0, random_seed=42)
+
+        matching_engine = OrderMatchingEngine(
+            instrument=self.instrument,
+            raw_id=0,
+            fill_model=fill_model,
+            fee_model=MakerTakerFeeModel(),
+            book_type=BookType.L1_MBP,
+            oms_type=OmsType.NETTING,
+            account_type=AccountType.MARGIN,
+            reject_stop_orders=True,
+            trade_execution=True,
+            msgbus=self.msgbus,
+            cache=self.cache,
+            clock=self.clock,
+        )
+
+        messages: list[Any] = []
+        self.msgbus.register("ExecEngine.process", messages.append)
+
+        # Set initial market state
+        quote = TestDataStubs.quote_tick(
+            instrument=self.instrument,
+            bid_price=211.30,
+            ask_price=211.40,
+        )
+        matching_engine.process_quote_tick(quote)
+
+        # Place limit order at 211.35 (in the spread)
+        order = TestExecStubs.limit_order(
+            instrument=self.instrument,
+            order_side=order_side,
+            price=Price.from_str("211.35"),
+            quantity=self.instrument.make_qty(1.0),
+        )
+        matching_engine.process_order(order, self.account_id)
+        messages.clear()
+
+        # Trade at exactly the limit price
+        trade = TestDataStubs.trade_tick(
+            instrument=self.instrument,
+            price=211.35,
+            aggressor_side=aggressor_side,
+        )
+        matching_engine.process_trade_tick(trade)
+
+        filled_events = [m for m in messages if isinstance(m, OrderFilled)]
+        assert len(filled_events) == 1, (
+            "Order should fill when trade at limit price with prob_fill_on_limit=1.0"
+        )
+        assert filled_events[0].last_px == Price.from_str("211.35")
+
+    @pytest.mark.parametrize(
+        ("order_side", "aggressor_side", "limit_price", "trade_price"),
+        [
+            # BUY: trade crosses below limit (better price for buyer)
+            (OrderSide.BUY, AggressorSide.SELLER, "211.35", 211.30),
+            # SELL: trade crosses above limit (better price for seller)
+            (OrderSide.SELL, AggressorSide.BUYER, "211.35", 211.40),
+        ],
+    )
+    def test_trade_execution_crossing_limit_fills_regardless_of_fill_model(
+        self,
+        order_side: OrderSide,
+        aggressor_side: AggressorSide,
+        limit_price: str,
+        trade_price: float,
+    ):
+        """
+        Test that when trade price crosses the limit (better price), the fill model is
+        NOT consulted and the order fills.
+
+        Crossing trades indicate the order would have been at the front of the queue.
+
+        """
+        fill_model = FillModel(prob_fill_on_limit=0.0, random_seed=42)
+
+        matching_engine = OrderMatchingEngine(
+            instrument=self.instrument,
+            raw_id=0,
+            fill_model=fill_model,
+            fee_model=MakerTakerFeeModel(),
+            book_type=BookType.L1_MBP,
+            oms_type=OmsType.NETTING,
+            account_type=AccountType.MARGIN,
+            reject_stop_orders=True,
+            trade_execution=True,
+            msgbus=self.msgbus,
+            cache=self.cache,
+            clock=self.clock,
+        )
+
+        messages: list[Any] = []
+        self.msgbus.register("ExecEngine.process", messages.append)
+
+        # Set initial market state
+        quote = TestDataStubs.quote_tick(
+            instrument=self.instrument,
+            bid_price=211.20,
+            ask_price=211.50,
+        )
+        matching_engine.process_quote_tick(quote)
+
+        # Place limit order
+        order = TestExecStubs.limit_order(
+            instrument=self.instrument,
+            order_side=order_side,
+            price=Price.from_str(limit_price),
+            quantity=self.instrument.make_qty(1.0),
+        )
+        matching_engine.process_order(order, self.account_id)
+        messages.clear()
+
+        # Trade crosses the limit price (better price)
+        trade = TestDataStubs.trade_tick(
+            instrument=self.instrument,
+            price=trade_price,
+            aggressor_side=aggressor_side,
+        )
+        matching_engine.process_trade_tick(trade)
+
+        filled_events = [m for m in messages if isinstance(m, OrderFilled)]
+        assert len(filled_events) == 1, (
+            "Order should fill when trade crosses limit regardless of fill model"
+        )
+        # Fill at limit price (conservative)
+        assert filled_events[0].last_px == Price.from_str(limit_price)
+
+    @pytest.mark.parametrize(
+        ("order_side", "aggressor_side"),
+        [
+            (OrderSide.BUY, AggressorSide.SELLER),
+            (OrderSide.SELL, AggressorSide.BUYER),
+        ],
+    )
+    def test_trade_execution_fill_model_rejection_still_applies_liquidity_consumption(
+        self,
+        order_side: OrderSide,
+        aggressor_side: AggressorSide,
+    ):
+        """
+        Test that when trade execution fill is skipped due to fill model rejection,
+        liquidity consumption tracking from the trade is still applied.
+
+        Setup: No book liquidity at the limit/trade price, so trade execution path
+        is exercised. Fill model rejects (prob=0), and trade consumption prevents
+        a subsequent trade from filling.
+
+        """
+        fill_model = FillModel(prob_fill_on_limit=0.0, random_seed=42)
+
+        matching_engine = OrderMatchingEngine(
+            instrument=self.instrument,
+            raw_id=0,
+            fill_model=fill_model,
+            fee_model=MakerTakerFeeModel(),
+            book_type=BookType.L2_MBP,
+            oms_type=OmsType.NETTING,
+            account_type=AccountType.MARGIN,
+            reject_stop_orders=True,
+            trade_execution=True,
+            msgbus=self.msgbus,
+            cache=self.cache,
+            clock=self.clock,
+            liquidity_consumption=True,
+        )
+
+        messages: list[Any] = []
+        self.msgbus.register("ExecEngine.process", messages.append)
+
+        # Set up book with liquidity AWAY from the limit/trade price.
+        # This ensures fills_at_trade_price=False so trade execution path is exercised.
+        if order_side == OrderSide.BUY:
+            bid_delta = OrderBookDelta(
+                instrument_id=self.instrument.id,
+                action=BookAction.ADD,
+                order=BookOrder(
+                    side=OrderSide.BUY,
+                    price=Price.from_str("200.00"),
+                    size=Quantity.from_str("1000.000"),
+                    order_id=100,
+                ),
+                flags=0,
+                sequence=0,
+                ts_event=0,
+                ts_init=0,
+            )
+            matching_engine.process_order_book_delta(bid_delta)
+
+            # Ask at 210.00 - NOT at 211.35 where limit/trade will be
+            ask_delta = OrderBookDelta(
+                instrument_id=self.instrument.id,
+                action=BookAction.ADD,
+                order=BookOrder(
+                    side=OrderSide.SELL,
+                    price=Price.from_str("210.00"),
+                    size=Quantity.from_str("50.000"),
+                    order_id=1,
+                ),
+                flags=0,
+                sequence=1,
+                ts_event=0,
+                ts_init=0,
+            )
+            matching_engine.process_order_book_delta(ask_delta)
+        else:
+            ask_delta = OrderBookDelta(
+                instrument_id=self.instrument.id,
+                action=BookAction.ADD,
+                order=BookOrder(
+                    side=OrderSide.SELL,
+                    price=Price.from_str("220.00"),
+                    size=Quantity.from_str("1000.000"),
+                    order_id=100,
+                ),
+                flags=0,
+                sequence=0,
+                ts_event=0,
+                ts_init=0,
+            )
+            matching_engine.process_order_book_delta(ask_delta)
+
+            # Bid at 212.00 - NOT at 211.35 where limit/trade will be
+            bid_delta = OrderBookDelta(
+                instrument_id=self.instrument.id,
+                action=BookAction.ADD,
+                order=BookOrder(
+                    side=OrderSide.BUY,
+                    price=Price.from_str("212.00"),
+                    size=Quantity.from_str("50.000"),
+                    order_id=1,
+                ),
+                flags=0,
+                sequence=1,
+                ts_event=0,
+                ts_init=0,
+            )
+            matching_engine.process_order_book_delta(bid_delta)
+
+        # First order consumes book liquidity (at 210.00 or 212.00)
+        order1 = TestExecStubs.market_order(
+            instrument=self.instrument,
+            order_side=order_side,
+            quantity=self.instrument.make_qty(50.0),
+            client_order_id=TestIdStubs.client_order_id(1),
+        )
+        matching_engine.process_order(order1, self.account_id)
+        matching_engine.iterate(timestamp_ns=1)
+
+        filled_events = [m for m in messages if isinstance(m, OrderFilled)]
+        assert len(filled_events) == 1
+        assert filled_events[0].last_qty == Quantity.from_str("50.000")
+        messages.clear()
+
+        # Place limit order at 211.35 (in the spread, no book liquidity here)
+        order2 = TestExecStubs.limit_order(
+            instrument=self.instrument,
+            order_side=order_side,
+            price=Price.from_str("211.35"),
+            quantity=self.instrument.make_qty(30.0),
+            client_order_id=TestIdStubs.client_order_id(2),
+        )
+        matching_engine.process_order(order2, self.account_id)
+        messages.clear()
+
+        # Trade tick at the limit price.
+        # fills_at_trade_price=False (no book at 211.35) → trade execution path entered
+        # Fill model rejects (prob=0) → no fill
+        trade = TestDataStubs.trade_tick(
+            instrument=self.instrument,
+            price=211.35,
+            aggressor_side=aggressor_side,
+        )
+        matching_engine.process_trade_tick(trade)
+
+        # Order should NOT fill due to fill model rejection
+        filled_events = [m for m in messages if isinstance(m, OrderFilled)]
+        assert len(filled_events) == 0, (
+            "Order should NOT fill when fill model rejects at limit price"
         )
